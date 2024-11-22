@@ -109,56 +109,27 @@ let parse_event_header line =
           "Regex of perf output did not match expected fields" (results : string array)])
 ;;
 
-external symbolize : executable:Filename.t -> addr:int -> (Event.Inlined_frame.t array) option = "magic_trace_llvm_symbolize_address" 
+external symbolize
+  :  executable:Filename.t
+  -> addr:int
+  -> Event.Inlined_frame.t array option
+  = "magic_trace_llvm_symbolize_address"
 
 let resolve_inlined_frames ~elf ~addr ~symbol
-  : (Symbol.t * Event.Inlined_frame.t array) option Deferred.t
+  : (Symbol.t * Event.Inlined_frame.t array) option
   =
   let executable = Elf.executable_file elf in
   let addr = Int64.to_int_trunc addr in
-  match symbolize ~executable ~addr with 
-  | None | Some [||] -> Deferred.return None
+  match symbolize ~executable ~addr with
+  | None | Some [||] -> None
   | Some inlined_frames ->
-    Deferred.return (
-    Some ( Symbol.(From_perf {symbol; demangled_name = Some (Array.unsafe_get inlined_frames 0).demangled_name}, inlined_frames))
-  )
-    (*
-      let rec decode_pair lines inlined_frames =
-        match lines with
-        | _ :: [] -> None
-        | [] -> None
-        | [ demangled_name; _loc ] ->
-          (* This is the last frame in the textual output from addr2line:
-             the non-inlined one.  The normal handling of symbol locations in
-             magic-trace should resolve the source location, so we don't
-             parse [_loc] here. *)
-          let symbol : Symbol.t =
-            From_perf { symbol; demangled_name = Some demangled_name }
-          in
-          Some (symbol, inlined_frames)
-        | demangled_name :: loc :: rest ->
-          (* This frame was inlined. *)
-          (match String.split loc ~on:':' with
-           | [ filename; line ] ->
-             (match Int.of_string_opt line with
-              | None -> None
-              | Some line ->
-                let filename =
-                  String.chop_prefix_if_exists filename ~prefix:"/jenga-root/"
-                in
-                let inlined_frame : Event.Inlined_frame.t =
-                  { demangled_name
-                  ; filename
-                  ; line
-                  ; (* XXX need llvm-symbolizer to get the column numbers *)
-                    column = 0
-                  }
-                in
-                decode_pair rest (inlined_frame :: inlined_frames))
-           | _ -> None)
-      in
-      let result = decode_pair lines [] in
-       *)
+    Some
+      Symbol.(
+        ( From_perf
+            { symbol
+            ; demangled_name = Some (Array.unsafe_get inlined_frames 0).demangled_name
+            }
+        , inlined_frames ))
 ;;
 
 let resolve_inlined_frames ~elf ~addr ~symbol =
@@ -171,11 +142,11 @@ let resolve_inlined_frames ~elf ~addr ~symbol =
        && Char.is_uppercase (String.get symbol 4)
     *)
   in
-  if is_caml_sym then resolve_inlined_frames ~elf ~addr ~symbol else Deferred.return None
+  if is_caml_sym then resolve_inlined_frames ~elf ~addr ~symbol else None
 ;;
 
 let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
-  : (Symbol.t * Event.Inlined_frame.t array * int) Deferred.t
+  : Symbol.t * Event.Inlined_frame.t array * int
   =
   match Re.Group.all (Re.exec symbol_and_offset_re str) with
   | [| _; symbol; offset |] ->
@@ -193,9 +164,9 @@ let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
     in
     let fallback = Symbol.From_perf { symbol; demangled_name = None }, [||], offset in
     (match elf with
-     | None -> Deferred.return fallback
+     | None -> fallback
      | Some elf ->
-       let%map result = resolve_inlined_frames ~elf ~addr ~symbol in
+       let result = resolve_inlined_frames ~elf ~addr ~symbol in
        (match result with
         | Some (symbol, inlined_frames) -> symbol, inlined_frames, offset
         | None -> fallback))
@@ -207,22 +178,21 @@ let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
         | [| _; dso |] ->
           (* CR-someday tbrindus: ideally, we would subtract the DSO base offset
              from [offset] here. *)
-          Deferred.return
-            ( Symbol.From_perf
-                { symbol = [%string "[unknown @ %{addr#Int64.Hex} (%{dso})]"]
-                ; demangled_name = None
-                }
-            , [||]
-            , 0 )
-        | _ | (exception _) -> Deferred.return failed)
+          ( Symbol.From_perf
+              { symbol = [%string "[unknown @ %{addr#Int64.Hex} (%{dso})]"]
+              ; demangled_name = None
+              }
+          , [||]
+          , 0 )
+        | _ | (exception _) -> failed)
      | Some perf_map, Some pid ->
        (match Perf_map.Table.symbol ~pid perf_map ~addr with
-        | None -> Deferred.return failed
+        | None -> failed
         | Some location ->
           (* It's strange that perf isn't resolving these symbols. It says on the
              tin that it supports perf map files! *)
           let offset = saturating_sub_i64 addr location.start_addr in
-          Deferred.return (Symbol.From_perf_map location, [||], offset)))
+          Symbol.From_perf_map location, [||], offset))
 ;;
 
 (* XXX mshinwell: handle inlined frames in this case too? *)
@@ -260,10 +230,10 @@ let parse_perf_cbr_event thread time line : Event.t =
 ;;
 
 let parse_location ?perf_maps ~elf ~pid instruction_pointer symbol_and_offset
-  : Event.Location.t Deferred.t
+  : Event.Location.t
   =
   let instruction_pointer = Util.int64_of_hex_string instruction_pointer in
-  let%map symbol, inlined_frames, symbol_offset =
+  let symbol, inlined_frames, symbol_offset =
     parse_symbol_and_offset
       ?perf_maps
       ~elf
@@ -279,7 +249,7 @@ let parse_location ?perf_maps ~elf ~pid instruction_pointer symbol_and_offset
 ;;
 
 let parse_callstack_entry ?perf_maps ~elf (thread : Event.Thread.t) line
-  : Event.Location.t Deferred.t
+  : Event.Location.t
   =
   match Re.Group.all (Re.exec perf_callstack_entry_re line) with
   | [| _; instruction_pointer; symbol_and_offset |] ->
@@ -291,15 +261,9 @@ let parse_callstack_entry ?perf_maps ~elf (thread : Event.Thread.t) line
           (results : string array)]
 ;;
 
-let parse_perf_cycles_event ?perf_maps ~elf (thread : Event.Thread.t) time lines
-  : Event.t Deferred.t
+let parse_perf_cycles_event ?perf_maps ~elf (thread : Event.Thread.t) time lines : Event.t
   =
-  let%map callstack_rev =
-    Deferred.List.map
-      ~how:`Parallel
-      lines
-      ~f:(parse_callstack_entry ?perf_maps ~elf thread)
-  in
+  let callstack_rev = List.map lines ~f:(parse_callstack_entry ?perf_maps ~elf thread) in
   Result.Ok
     { Event.Ok.thread
     ; time
@@ -308,7 +272,7 @@ let parse_perf_cycles_event ?perf_maps ~elf (thread : Event.Thread.t) time lines
 ;;
 
 let parse_perf_branches_event ?perf_maps ~elf (thread : Event.Thread.t) time line
-  : Event.t Deferred.t
+  : Event.t
   =
   match Re.Group.all (Re.exec perf_branches_event_re line) with
   | [| _
@@ -320,7 +284,7 @@ let parse_perf_branches_event ?perf_maps ~elf (thread : Event.Thread.t) time lin
     |] ->
     let src_instruction_pointer = Util.int64_of_hex_string src_instruction_pointer in
     let dst_instruction_pointer = Util.int64_of_hex_string dst_instruction_pointer in
-    let%bind src_symbol, src_inlined_frames, src_symbol_offset =
+    let src_symbol, src_inlined_frames, src_symbol_offset =
       parse_symbol_and_offset
         ?perf_maps
         ~elf
@@ -328,7 +292,7 @@ let parse_perf_branches_event ?perf_maps ~elf (thread : Event.Thread.t) time lin
         src_symbol_and_offset
         ~addr:src_instruction_pointer
     in
-    let%map dst_symbol, dst_inlined_frames, dst_symbol_offset =
+    let dst_symbol, dst_inlined_frames, dst_symbol_offset =
       parse_symbol_and_offset
         ?perf_maps
         ~elf
@@ -416,9 +380,9 @@ let parse_perf_extra_sampled_event
   line
   lines
   name
-  : Event.t Deferred.t
+  : Event.t
   =
-  let%map (location : Event.Location.t) =
+  let (location : Event.Location.t) =
     match lines with
     | [] ->
       (match Re.Group.all (Re.exec perf_extra_sampled_event_re line) with
@@ -439,30 +403,30 @@ let parse_perf_extra_sampled_event
     { Event.Ok.thread; time; data = Event_sample { location; count = period; name } }
 ;;
 
-let to_event ?perf_maps ~elf lines : Event.t option Deferred.t =
+let to_event ?perf_maps ~elf lines : Event.t option =
   try
     match lines with
     | [] -> raise_s [%message "Unexpected line while parsing perf output."]
     | first_line :: lines ->
       let header = parse_event_header first_line in
       (match header with
-       | Trace_error -> Deferred.return (Some (Error (trace_error_to_event first_line)))
+       | Trace_error -> Some (Error (trace_error_to_event first_line))
        | Event { thread; time; period; event; remaining_line } ->
          (match event with
           | `Branches ->
-            let%map result =
+            let result =
               parse_perf_branches_event ?perf_maps ~elf thread time remaining_line
             in
             Some result
           | `Cbr ->
             (* cbr (core-to-bus ratio) are events which show frequency changes. *)
-            Deferred.return (Some (parse_perf_cbr_event thread time remaining_line))
-          | `Psb -> (* Ignore psb (packet stream boundary) packets *) Deferred.return None
+            Some (parse_perf_cbr_event thread time remaining_line)
+          | `Psb -> (* Ignore psb (packet stream boundary) packets *) None
           | `Cycles ->
-            let%map result = parse_perf_cycles_event ?perf_maps ~elf thread time lines in
+            let result = parse_perf_cycles_event ?perf_maps ~elf thread time lines in
             Some result
           | `Branch_misses ->
-            let%map result =
+            let result =
               parse_perf_extra_sampled_event
                 ?perf_maps
                 ~elf
@@ -475,7 +439,7 @@ let to_event ?perf_maps ~elf lines : Event.t option Deferred.t =
             in
             Some result
           | `Cache_misses ->
-            let%map result =
+            let result =
               parse_perf_extra_sampled_event
                 ?perf_maps
                 ~elf
@@ -525,9 +489,9 @@ let split_line_pipe pipe : string list Pipe.Reader.t =
 
 (* XXX unclear that block_on_async_exn is the right thing here, as may already be in
    async *)
-let to_event_blocking ?perf_maps ~elf lines : Event.t option =
-  Thread_safe.block_on_async_exn (fun () -> to_event ?perf_maps ~elf lines)
-;;
+(*let to_event_blocking ?perf_maps ~elf lines : Event.t option =*)
+(*  Thread_safe.block_on_async_exn (fun () -> to_event ?perf_maps ~elf lines)*)
+(*;;*)
 
 let to_events ?perf_maps ~elf pipe =
   let pipe = split_line_pipe pipe in
@@ -535,7 +499,7 @@ let to_events ?perf_maps ~elf pipe =
      including converting to pipes which says that the stream creation should be
      switched to a pipe creation. Changing Async_shell is out-of-scope, and I also
      can't see a reason why filter_map would lead to memory leaks. *)
-  Pipe.filter_map' pipe ~f:(to_event ?perf_maps ~elf)
+  Pipe.filter_map pipe ~f:(to_event ?perf_maps ~elf)
 ;;
 
 let%test_module _ =
@@ -543,7 +507,7 @@ let%test_module _ =
     open Core
 
     let check s =
-      to_event_blocking ~elf:None (String.split ~on:'\n' s)
+      to_event ~elf:None (String.split ~on:'\n' s)
       |> [%sexp_of: Event.t option]
       |> print_s
     ;;
@@ -1032,6 +996,6 @@ let%test_module _ =
 ;;
 
 module For_testing = struct
-  let to_event = to_event_blocking ~elf:None
+  let to_event = to_event ~elf:None
   let split_line_pipe = split_line_pipe
 end
