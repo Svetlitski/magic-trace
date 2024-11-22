@@ -9,14 +9,61 @@
    (run %{bin:gcc} -shared -fPIC -o dlfilter/perf_dlfilter.so perf_dlfilter.o)
    (run %{bin:ocaml-crunch} -m plain dlfilter -o perf_dlfilter.ml))))
 
+(data_only_dirs llvm)
+
+(rule
+  (targets libLLVM.a)
+  (deps    llvm_symbolizer_stubs.cpp)
+  (action (
+    progn
+    (run clang++ -DCAML_NAME_SPACE -I %{ocaml_where} -I llvm/include -O3 -march=haswell -mtune=skylake -fPIC -fno-rtti -flto=thin -c llvm_symbolizer_stubs.cpp)
+    (run
+     ld.lld
+     -static
+     -r
+     -plugin-opt=mcpu=haswell
+     -plugin-opt=O3
+     -plugin-opt=thinlto
+     --hash-style=gnu
+     --build-id
+     --start-lib
+     llvm/libLLVMSymbolize.a
+     llvm/libLLVMDebugInfoBTF.a
+     llvm/libLLVMDebugInfoPDB.a
+     llvm/libLLVMDebugInfoMSF.a
+     llvm/libLLVMDebugInfoDWARF.a
+     llvm/libLLVMOption.a
+     llvm/libLLVMObject.a
+     llvm/libLLVMTextAPI.a
+     llvm/libLLVMMCParser.a
+     llvm/libLLVMIRReader.a
+     llvm/libLLVMAsmParser.a
+     llvm/libLLVMMC.a
+     llvm/libLLVMDebugInfoCodeView.a
+     llvm/libLLVMBitReader.a
+     llvm/libLLVMCore.a
+     llvm/libLLVMRemarks.a
+     llvm/libLLVMBinaryFormat.a
+     llvm/libLLVMTargetParser.a
+     llvm/libLLVMBitstreamReader.a
+     llvm/libLLVMSupport.a
+     llvm/libLLVMDemangle.a
+     --end-lib
+     llvm_symbolizer_stubs.o
+     -o
+     libLLVM.o)
+    (run llvm-strip --keep-symbol=magic_trace_llvm_symbolize_address libLLVM.o)
+    (run llvm-ar Drcs %{targets} libLLVM.o))))
+
 (library
  (name magic_trace_lib)
  (public_name magic-trace.magic_trace_lib)
+ (no_dynlink)
  (flags (:standard -cclib -lstdc++))
  (foreign_stubs
   (language c)
-  (flags (:standard -fPIC))
   (names breakpoint_stubs boot_time_stubs ptrace_stubs))
+ (foreign_archives LLVM)
  (libraries core async core_unix.filename_unix fzf re shell
    core_unix.sys_unix cohttp cohttp_static_handler core_unix.signal_unix
    tracing magic_trace owee angstrom expect_test_helpers_core)

@@ -2,7 +2,6 @@
  (names magic_trace_bin)
  (public_names magic-trace)
  (libraries core magic_trace_lib core_unix.command_unix)
- (extra_objects combined_symbolizer_for_magic_trace)
  (foreign_stubs
   (language c)
   (names version_stubs))

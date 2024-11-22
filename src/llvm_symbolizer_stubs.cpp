@@ -1,16 +1,16 @@
 #include <cstdint>
-#include "./install/include/llvm/DebugInfo/Symbolize/Symbolize.h"
-#define CAML_NAME_SPACE
-#include "/usr/local/home/ksvetlitski/application_data/opam/magic-trace/lib/ocaml/caml/alloc.h"
-#include "/usr/local/home/ksvetlitski/application_data/opam/magic-trace/lib/ocaml/caml/memory.h"
-#include "/usr/local/home/ksvetlitski/application_data/opam/magic-trace/lib/ocaml/caml/mlvalues.h"
+
+#include "caml/alloc.h"
+#include "caml/memory.h"
+#include "caml/mlvalues.h"
+#include "llvm/include/llvm/DebugInfo/Symbolize/Symbolize.h"
 
 llvm::symbolize::LLVMSymbolizer symbolizer{{.UseSymbolTable = false}};
 namespace {
 value ocaml_string_of_cpp_string(const std::string &string) {
   return caml_alloc_initialized_string(string.length(), string.data());
 }
-}
+} // namespace
 
 struct inlined_frame {
   value demangled_name /* : string */;
