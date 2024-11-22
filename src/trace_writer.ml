@@ -660,13 +660,23 @@ let call t thread_info ~time ~(location : Event.Location.t) =
   Callstack.push thread_info.callstack location
 ;;
 
+let[@inline always] array_iter_rev array ~f = 
+  let len = Array.length array in
+  for i = len - 1 downto 0
+  do
+    f (Array.unsafe_get array i)
+  done
+;;
+
 let ret_without_checking_for_go_hacks t (thread_info : _ Thread_info.t) ~time =
   match Callstack.pop thread_info.callstack with
   | Some { symbol; inlined_frames_outermost_first; _ } ->
     (* Any inlined frames at the return site should be forgotten about by
        "causing those frames to return".  This is done for the one corresponding
        to the deepest inlining first. *)
-    Array.iter (*List.rev*) inlined_frames_outermost_first ~f:(fun frame ->
+    (*Array.iter*) (*List.rev*) 
+    array_iter_rev
+    inlined_frames_outermost_first ~f:(fun frame ->
       let ev =
         Pending_event.create_inlined_ret frame "ret_without_checking_for_go_hacks"
       in
@@ -860,7 +870,7 @@ let emit_inlined_frame_adjustments
         (Sexp.to_string (Array.sexp_of_t Event.Inlined_frame.sexp_of_t new_frames_to_push)));
     (* Same function in terms of program counter, but different inlining
        stacks; make the necessary adjustments. *)
-    Array.iter ((*List.rev*) prev_frames_to_pop) ~f:(fun frame ->
+    (*Array.iter*) (*List.rev*) array_iter_rev prev_frames_to_pop ~f:(fun frame ->
       let ev = Pending_event.create_inlined_ret frame "check_current_symbol" in
       add_event t thread_info time ev);
     Array.iter new_frames_to_push ~f:(fun frame ->
