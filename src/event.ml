@@ -40,7 +40,7 @@ module Location = struct
     { instruction_pointer : Int64.Hex.t
     ; symbol : Symbol.t
     ; symbol_offset : Int.Hex.t
-    ; inlined_frames_outermost_first : Inlined_frame.t list
+    ; inlined_frames_outermost_first : Inlined_frame.t array
     }
   [@@deriving sexp, fields, bin_io]
 
@@ -79,7 +79,7 @@ module Location = struct
     { instruction_pointer = 0L
     ; symbol
     ; symbol_offset = 0
-    ; inlined_frames_outermost_first = []
+    ; inlined_frames_outermost_first = [||]
     }
   ;;
 

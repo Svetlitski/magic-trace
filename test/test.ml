@@ -43,7 +43,7 @@ end = struct
     { Event.Location.instruction_pointer = 0L
     ; symbol
     ; symbol_offset = 0
-    ; inlined_frames_outermost_first = []
+    ; inlined_frames_outermost_first = [||]
     }
   ;;
 
@@ -64,7 +64,7 @@ end = struct
           symbol
           ~default:(Symbol.From_perf { symbol = ""; demangled_name = None })
     ; symbol_offset = offset ()
-    ; inlined_frames_outermost_first = []
+    ; inlined_frames_outermost_first = [||]
     }
   ;;
 

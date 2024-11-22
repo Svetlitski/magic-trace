@@ -5,15 +5,17 @@
  (action
   (progn
    (run mkdir -p dlfilter)
-   (run %{bin:gcc} -c -fpic %{dep})
-   (run %{bin:gcc} -shared -o dlfilter/perf_dlfilter.so perf_dlfilter.o)
+   (run %{bin:gcc} -c -fPIC %{dep})
+   (run %{bin:gcc} -shared -fPIC -o dlfilter/perf_dlfilter.so perf_dlfilter.o)
    (run %{bin:ocaml-crunch} -m plain dlfilter -o perf_dlfilter.ml))))
 
 (library
  (name magic_trace_lib)
  (public_name magic-trace.magic_trace_lib)
+ (flags (:standard -cclib -lstdc++))
  (foreign_stubs
   (language c)
+  (flags (:standard -fPIC))
   (names breakpoint_stubs boot_time_stubs ptrace_stubs))
  (libraries core async core_unix.filename_unix fzf re shell
    core_unix.sys_unix cohttp cohttp_static_handler core_unix.signal_unix

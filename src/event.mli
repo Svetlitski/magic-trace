@@ -38,7 +38,7 @@ module Location : sig
     { instruction_pointer : int64
     ; symbol : Symbol.t
     ; symbol_offset : int
-    ; inlined_frames_outermost_first : Inlined_frame.t list
+    ; inlined_frames_outermost_first : Inlined_frame.t array
     }
   [@@deriving sexp, fields, bin_io]
 

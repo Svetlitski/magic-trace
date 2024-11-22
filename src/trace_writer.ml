@@ -654,7 +654,7 @@ let call t thread_info ~time ~(location : Event.Location.t) =
   add_event t thread_info time ev;
   (* Add any inlined frames that exist at the new program counter in the callee,
      starting from the outermost (least deep) inlining. *)
-  List.iter location.inlined_frames_outermost_first ~f:(fun frame ->
+  Array.iter location.inlined_frames_outermost_first ~f:(fun frame ->
     let ev = Pending_event.create_inlined_call frame ~from_untraced:false "call" in
     add_event t thread_info time ev);
   Callstack.push thread_info.callstack location
@@ -666,7 +666,7 @@ let ret_without_checking_for_go_hacks t (thread_info : _ Thread_info.t) ~time =
     (* Any inlined frames at the return site should be forgotten about by
        "causing those frames to return".  This is done for the one corresponding
        to the deepest inlining first. *)
-    List.iter (List.rev inlined_frames_outermost_first) ~f:(fun frame ->
+    Array.iter (*List.rev*) inlined_frames_outermost_first ~f:(fun frame ->
       let ev =
         Pending_event.create_inlined_ret frame "ret_without_checking_for_go_hacks"
       in
@@ -805,7 +805,7 @@ let emit_inlined_frame_adjustments
   =
   let different_inlined_frames =
     not
-      ([%compare.equal: Event.Inlined_frame.t list]
+      ([%compare.equal: Event.Inlined_frame.t array]
          previous_inlined_frames
          new_inlined_frames)
   in
@@ -816,17 +816,36 @@ let emit_inlined_frame_adjustments
       Stdlib.Printf.printf
         "prev frames = %s, new frames = %s\n%!"
         (Sexp.to_string
-           (List.sexp_of_t Event.Inlined_frame.sexp_of_t previous_inlined_frames))
-        (Sexp.to_string (List.sexp_of_t Event.Inlined_frame.sexp_of_t new_inlined_frames));
-    let rec chop_common_prefix prev_frames new_frames =
-      match prev_frames, new_frames with
-      | [], [] -> [], []
-      | [], _ :: _ -> [], new_frames
-      | _ :: _, [] -> prev_frames, []
-      | p :: ps, n :: ns ->
-        if [%compare.equal: Event.Inlined_frame.t] p n
-        then chop_common_prefix ps ns
-        else prev_frames, new_frames
+           (Array.sexp_of_t Event.Inlined_frame.sexp_of_t previous_inlined_frames))
+        (Sexp.to_string
+           (Array.sexp_of_t Event.Inlined_frame.sexp_of_t new_inlined_frames));
+    let chop_common_prefix prev_frames new_frames =
+      let prev_frames_len = Array.length prev_frames in
+      let new_frames_len = Array.length new_frames in
+      let i = ref 0 in
+      while (
+        match !i < prev_frames_len && !i < new_frames_len with
+        | false -> false
+        | true ->
+          [%compare.equal: Event.Inlined_frame.t]
+            (Array.unsafe_get prev_frames !i)
+            (Array.unsafe_get new_frames !i)
+      )
+      do
+        incr i
+      done;
+      if !i = 0 then prev_frames, new_frames else
+        Array.subo ~pos:!i prev_frames, Array.subo ~pos:!i new_frames
+      (*
+         match prev_frames, new_frames with
+         | [], [] -> [], []
+         | [], _ :: _ -> [], new_frames
+         | _ :: _, [] -> prev_frames, []
+         | p :: ps, n :: ns ->
+         if [%compare.equal: Event.Inlined_frame.t] p n
+         then chop_common_prefix ps ns
+         else prev_frames, new_frames
+      *)
     in
     let prev_frames_to_pop, new_frames_to_push =
       chop_common_prefix previous_inlined_frames new_inlined_frames
@@ -835,16 +854,16 @@ let emit_inlined_frame_adjustments
     then (
       Stdlib.Printf.printf
         "to pop: %s\n%!"
-        (Sexp.to_string (List.sexp_of_t Event.Inlined_frame.sexp_of_t prev_frames_to_pop));
+        (Sexp.to_string (Array.sexp_of_t Event.Inlined_frame.sexp_of_t prev_frames_to_pop));
       Stdlib.Printf.printf
         "to push: %s\n%!"
-        (Sexp.to_string (List.sexp_of_t Event.Inlined_frame.sexp_of_t new_frames_to_push)));
+        (Sexp.to_string (Array.sexp_of_t Event.Inlined_frame.sexp_of_t new_frames_to_push)));
     (* Same function in terms of program counter, but different inlining
        stacks; make the necessary adjustments. *)
-    List.iter (List.rev prev_frames_to_pop) ~f:(fun frame ->
+    Array.iter ((*List.rev*) prev_frames_to_pop) ~f:(fun frame ->
       let ev = Pending_event.create_inlined_ret frame "check_current_symbol" in
       add_event t thread_info time ev);
-    List.iter new_frames_to_push ~f:(fun frame ->
+    Array.iter new_frames_to_push ~f:(fun frame ->
       let ev =
         Pending_event.create_inlined_call
           frame
@@ -901,7 +920,7 @@ let check_current_symbol
     let ev = Pending_event.create_call location ~from_untraced:true in
     write_pending_event t thread_info thread_info.callstack.create_time ev;
     let new_inlined_frames = location.inlined_frames_outermost_first in
-    List.iter new_inlined_frames ~f:(fun frame ->
+    Array.iter new_inlined_frames ~f:(fun frame ->
       let ev =
         Pending_event.create_inlined_call
           frame
@@ -1012,7 +1031,7 @@ end = struct
        | Some { inlined_frames_outermost_first = previous_inlined_frames; _ } ->
          let new_inlined_frames =
            match Callstack.top thread_info.callstack with
-           | None -> []
+           | None -> [||]
            | Some { inlined_frames_outermost_first; _ } -> inlined_frames_outermost_first
          in
          emit_inlined_frame_adjustments
@@ -1105,10 +1124,10 @@ end = struct
                    match Stack.top thread_info.inactive_callstacks with
                    | Some callstack ->
                      (match Callstack.top callstack with
-                      | None -> []
+                      | None -> [||]
                       | Some { inlined_frames_outermost_first; _ } ->
                         inlined_frames_outermost_first)
-                   | None -> []
+                   | None -> [||]
                  in
                  emit_inlined_frame_adjustments
                    t
@@ -1155,7 +1174,7 @@ let rewrite_callstack t ~(callstack : Callstack.t) ~thread_info ~time =
       time
       (Pending_event.create_call location ~from_untraced:true);
     let new_inlined_frames = location.inlined_frames_outermost_first in
-    List.iter new_inlined_frames ~f:(fun frame ->
+    Array.iter new_inlined_frames ~f:(fun frame ->
       let ev =
         Pending_event.create_inlined_call frame ~from_untraced:true "rewrite_callstack"
       in

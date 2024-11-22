@@ -109,88 +109,56 @@ let parse_event_header line =
           "Regex of perf output did not match expected fields" (results : string array)])
 ;;
 
-(* Examples:
-
-   $ addr2line -f -i -e inline_tests_runner.exe 0x4ed9c6
-   Base.Info.sexp_of_t
-   /jenga-root/lib/base/test/info.ml:224
-   Base_test.Test_info.(fun).test
-   /jenga-root/lib/base/test/info.ml:224
-   Base_test.Test_info.(fun)
-   /jenga-root/lib/base/test/test_info.ml:93
-
-   $ llvm-symbolizer --inlines --functions --exe inline_tests_runner.exe 0x4ed9c6
-   Base.Info.sexp_of_t
-   /jenga-root/lib/base/test/info.ml:224:18
-   Base_test.Test_info.(fun).test
-   /jenga-root/lib/base/test/info.ml:224:38
-   camlBase_test__Test_info__fn$5btest_info.ml$3a83$2c0$2d$2d748$5d_23_253_code
-   /jenga-root/lib/base/test/test_info.ml:93:19
-
-   $ addr2line -f -i -e inline_tests_runner.exe 0x4e00000
-   ??
-   ??:0
-*)
-
-let cache = Hashtbl.Poly.create ()
+external symbolize : executable:Filename.t -> addr:int -> (Event.Inlined_frame.t array) option = "magic_trace_llvm_symbolize_address" 
 
 let resolve_inlined_frames ~elf ~addr ~symbol
-  : (Symbol.t * Event.Inlined_frame.t list) option Deferred.t
+  : (Symbol.t * Event.Inlined_frame.t array) option Deferred.t
   =
-  let executable_file = Elf.executable_file elf in
-  let addr = Printf.sprintf "0x%Lx" addr in
-  match Hashtbl.Poly.find cache addr with
-  | Some result -> Deferred.return result
-  | None ->
-    let%map output =
-      Process.run_lines
-        ~prog:"/usr/bin/addr2line"
-        ~args:[ "-f"; "-i"; "-e"; executable_file; addr ]
-        ()
-    in
-    (match output with
-     | Error _ | Ok [] -> None
-     | Ok lines ->
-       if String.equal (List.hd_exn lines) "??"
-       then None
-       else (
-         let rec decode_pair lines inlined_frames =
-           match lines with
-           | _ :: [] -> None
-           | [] -> None
-           | [ demangled_name; _loc ] ->
-             (* This is the last frame in the textual output from addr2line:
-                the non-inlined one.  The normal handling of symbol locations in
-                magic-trace should resolve the source location, so we don't
-                parse [_loc] here. *)
-             let symbol : Symbol.t =
-               From_perf { symbol; demangled_name = Some demangled_name }
-             in
-             Some (symbol, inlined_frames)
-           | demangled_name :: loc :: rest ->
-             (* This frame was inlined. *)
-             (match String.split loc ~on:':' with
-              | [ filename; line ] ->
-                (match Int.of_string_opt line with
-                 | None -> None
-                 | Some line ->
-                   let filename =
-                     String.chop_prefix_if_exists filename ~prefix:"/jenga-root/"
-                   in
-                   let inlined_frame : Event.Inlined_frame.t =
-                     { demangled_name
-                     ; filename
-                     ; line
-                     ; (* XXX need llvm-symbolizer to get the column numbers *)
-                       column = 0
-                     }
-                   in
-                   decode_pair rest (inlined_frame :: inlined_frames))
-              | _ -> None)
-         in
-         let result = decode_pair lines [] in
-         Hashtbl.Poly.add_exn cache ~key:addr ~data:result;
-         result))
+  let executable = Elf.executable_file elf in
+  let addr = Int64.to_int_trunc addr in
+  match symbolize ~executable ~addr with 
+  | None | Some [||] -> Deferred.return None
+  | Some inlined_frames ->
+    Deferred.return (
+    Some ( Symbol.(From_perf {symbol; demangled_name = Some (Array.unsafe_get inlined_frames 0).demangled_name}, inlined_frames))
+  )
+    (*
+      let rec decode_pair lines inlined_frames =
+        match lines with
+        | _ :: [] -> None
+        | [] -> None
+        | [ demangled_name; _loc ] ->
+          (* This is the last frame in the textual output from addr2line:
+             the non-inlined one.  The normal handling of symbol locations in
+             magic-trace should resolve the source location, so we don't
+             parse [_loc] here. *)
+          let symbol : Symbol.t =
+            From_perf { symbol; demangled_name = Some demangled_name }
+          in
+          Some (symbol, inlined_frames)
+        | demangled_name :: loc :: rest ->
+          (* This frame was inlined. *)
+          (match String.split loc ~on:':' with
+           | [ filename; line ] ->
+             (match Int.of_string_opt line with
+              | None -> None
+              | Some line ->
+                let filename =
+                  String.chop_prefix_if_exists filename ~prefix:"/jenga-root/"
+                in
+                let inlined_frame : Event.Inlined_frame.t =
+                  { demangled_name
+                  ; filename
+                  ; line
+                  ; (* XXX need llvm-symbolizer to get the column numbers *)
+                    column = 0
+                  }
+                in
+                decode_pair rest (inlined_frame :: inlined_frames))
+           | _ -> None)
+      in
+      let result = decode_pair lines [] in
+       *)
 ;;
 
 let resolve_inlined_frames ~elf ~addr ~symbol =
@@ -207,7 +175,7 @@ let resolve_inlined_frames ~elf ~addr ~symbol =
 ;;
 
 let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
-  : (Symbol.t * Event.Inlined_frame.t list * int) Deferred.t
+  : (Symbol.t * Event.Inlined_frame.t array * int) Deferred.t
   =
   match Re.Group.all (Re.exec symbol_and_offset_re str) with
   | [| _; symbol; offset |] ->
@@ -223,7 +191,7 @@ let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
          avoid the extra allocation. *)
       Util.int_trunc_of_hex_string ~remove_hex_prefix:true offset
     in
-    let fallback = Symbol.From_perf { symbol; demangled_name = None }, [], offset in
+    let fallback = Symbol.From_perf { symbol; demangled_name = None }, [||], offset in
     (match elf with
      | None -> Deferred.return fallback
      | Some elf ->
@@ -232,7 +200,7 @@ let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
         | Some (symbol, inlined_frames) -> symbol, inlined_frames, offset
         | None -> fallback))
   | _ | (exception _) ->
-    let failed = Symbol.Unknown, [], 0 in
+    let failed = Symbol.Unknown, [||], 0 in
     (match perf_maps, pid with
      | None, _ | _, None ->
        (match Re.Group.all (Re.exec unknown_symbol_dso_re str) with
@@ -244,7 +212,7 @@ let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
                 { symbol = [%string "[unknown @ %{addr#Int64.Hex} (%{dso})]"]
                 ; demangled_name = None
                 }
-            , []
+            , [||]
             , 0 )
         | _ | (exception _) -> Deferred.return failed)
      | Some perf_map, Some pid ->
@@ -254,7 +222,7 @@ let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
           (* It's strange that perf isn't resolving these symbols. It says on the
              tin that it supports perf map files! *)
           let offset = saturating_sub_i64 addr location.start_addr in
-          Deferred.return (Symbol.From_perf_map location, [], offset)))
+          Deferred.return (Symbol.From_perf_map location, [||], offset)))
 ;;
 
 (* XXX mshinwell: handle inlined frames in this case too? *)
