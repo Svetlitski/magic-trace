@@ -123,13 +123,9 @@ let resolve_inlined_frames ~elf ~addr ~symbol
   match symbolize ~executable ~addr with
   | None | Some [||] -> None
   | Some inlined_frames ->
-    Some
-      Symbol.(
-        ( From_perf
-            { symbol
-            ; demangled_name = Some (Array.unsafe_get inlined_frames 0).demangled_name
-            }
-        , inlined_frames ))
+    let demangled_name = (Array.unsafe_get inlined_frames 0).demangled_name in
+    let symbol = Symbol.From_perf { symbol; demangled_name = Some demangled_name } in
+    Some (symbol, inlined_frames)
 ;;
 
 let resolve_inlined_frames ~elf ~addr ~symbol =
