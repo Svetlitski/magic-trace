@@ -109,7 +109,106 @@ let parse_event_header line =
           "Regex of perf output did not match expected fields" (results : string array)])
 ;;
 
-let parse_symbol_and_offset ?perf_maps pid str ~addr : Symbol.t * int =
+(* Examples:
+
+   $ addr2line -f -i -e inline_tests_runner.exe 0x4ed9c6
+   Base.Info.sexp_of_t
+   /jenga-root/lib/base/test/info.ml:224
+   Base_test.Test_info.(fun).test
+   /jenga-root/lib/base/test/info.ml:224
+   Base_test.Test_info.(fun)
+   /jenga-root/lib/base/test/test_info.ml:93
+
+   $ llvm-symbolizer --inlines --functions --exe inline_tests_runner.exe 0x4ed9c6
+   Base.Info.sexp_of_t
+   /jenga-root/lib/base/test/info.ml:224:18
+   Base_test.Test_info.(fun).test
+   /jenga-root/lib/base/test/info.ml:224:38
+   camlBase_test__Test_info__fn$5btest_info.ml$3a83$2c0$2d$2d748$5d_23_253_code
+   /jenga-root/lib/base/test/test_info.ml:93:19
+
+   $ addr2line -f -i -e inline_tests_runner.exe 0x4e00000
+   ??
+   ??:0
+*)
+
+let cache = Hashtbl.Poly.create ()
+
+let resolve_inlined_frames ~elf ~addr ~symbol
+  : (Symbol.t * Event.Inlined_frame.t list) option Deferred.t
+  =
+  let executable_file = Elf.executable_file elf in
+  let addr = Printf.sprintf "0x%Lx" addr in
+  match Hashtbl.Poly.find cache addr with
+  | Some result -> Deferred.return result
+  | None ->
+    let%map output =
+      Process.run_lines
+        ~prog:"/usr/bin/addr2line"
+        ~args:[ "-f"; "-i"; "-e"; executable_file; addr ]
+        ()
+    in
+    (match output with
+     | Error _ | Ok [] -> None
+     | Ok lines ->
+       if String.equal (List.hd_exn lines) "??"
+       then None
+       else (
+         let rec decode_pair lines inlined_frames =
+           match lines with
+           | _ :: [] -> None
+           | [] -> None
+           | [ demangled_name; _loc ] ->
+             (* This is the last frame in the textual output from addr2line:
+                the non-inlined one.  The normal handling of symbol locations in
+                magic-trace should resolve the source location, so we don't
+                parse [_loc] here. *)
+             let symbol : Symbol.t =
+               From_perf { symbol; demangled_name = Some demangled_name }
+             in
+             Some (symbol, inlined_frames)
+           | demangled_name :: loc :: rest ->
+             (* This frame was inlined. *)
+             (match String.split loc ~on:':' with
+              | [ filename; line ] ->
+                (match Int.of_string_opt line with
+                 | None -> None
+                 | Some line ->
+                   let filename =
+                     String.chop_prefix_if_exists filename ~prefix:"/jenga-root/"
+                   in
+                   let inlined_frame : Event.Inlined_frame.t =
+                     { demangled_name
+                     ; filename
+                     ; line
+                     ; (* XXX need llvm-symbolizer to get the column numbers *)
+                       column = 0
+                     }
+                   in
+                   decode_pair rest (inlined_frame :: inlined_frames))
+              | _ -> None)
+         in
+         let result = decode_pair lines [] in
+         Hashtbl.Poly.add_exn cache ~key:addr ~data:result;
+         result))
+;;
+
+let resolve_inlined_frames ~elf ~addr ~symbol =
+  let is_caml_sym =
+    (* perf has already tried to demangle... *)
+    Char.is_uppercase (String.get symbol 0) && String.is_suffix symbol ~suffix:"_code"
+    (*
+       String.length symbol >= 5
+       && String.equal (String.sub symbol ~pos:0 ~len:4) "caml"
+       && Char.is_uppercase (String.get symbol 4)
+    *)
+  in
+  if is_caml_sym then resolve_inlined_frames ~elf ~addr ~symbol else Deferred.return None
+;;
+
+let parse_symbol_and_offset ?perf_maps ~elf pid str ~addr
+  : (Symbol.t * Event.Inlined_frame.t list * int) Deferred.t
+  =
   match Re.Group.all (Re.exec symbol_and_offset_re str) with
   | [| _; symbol; offset |] ->
     let offset =
@@ -124,26 +223,41 @@ let parse_symbol_and_offset ?perf_maps pid str ~addr : Symbol.t * int =
          avoid the extra allocation. *)
       Util.int_trunc_of_hex_string ~remove_hex_prefix:true offset
     in
-    From_perf symbol, offset
+    let fallback = Symbol.From_perf { symbol; demangled_name = None }, [], offset in
+    (match elf with
+     | None -> Deferred.return fallback
+     | Some elf ->
+       let%map result = resolve_inlined_frames ~elf ~addr ~symbol in
+       (match result with
+        | Some (symbol, inlined_frames) -> symbol, inlined_frames, offset
+        | None -> fallback))
   | _ | (exception _) ->
-    let failed = Symbol.Unknown, 0 in
+    let failed = Symbol.Unknown, [], 0 in
     (match perf_maps, pid with
      | None, _ | _, None ->
        (match Re.Group.all (Re.exec unknown_symbol_dso_re str) with
         | [| _; dso |] ->
           (* CR-someday tbrindus: ideally, we would subtract the DSO base offset
              from [offset] here. *)
-          From_perf [%string "[unknown @ %{addr#Int64.Hex} (%{dso})]"], 0
-        | _ | (exception _) -> failed)
+          Deferred.return
+            ( Symbol.From_perf
+                { symbol = [%string "[unknown @ %{addr#Int64.Hex} (%{dso})]"]
+                ; demangled_name = None
+                }
+            , []
+            , 0 )
+        | _ | (exception _) -> Deferred.return failed)
      | Some perf_map, Some pid ->
        (match Perf_map.Table.symbol ~pid perf_map ~addr with
-        | None -> failed
+        | None -> Deferred.return failed
         | Some location ->
           (* It's strange that perf isn't resolving these symbols. It says on the
              tin that it supports perf map files! *)
           let offset = saturating_sub_i64 addr location.start_addr in
-          From_perf_map location, offset))
+          Deferred.return (Symbol.From_perf_map location, [], offset)))
 ;;
+
+(* XXX mshinwell: handle inlined frames in this case too? *)
 
 let trace_error_to_event line : Event.Decode_error.t =
   match Re.Group.all (Re.exec trace_error_re line) with
@@ -177,20 +291,31 @@ let parse_perf_cbr_event thread time line : Event.t =
         "Regex of perf cbr event did not match expected fields" (results : string array)]
 ;;
 
-let parse_location ?perf_maps ~pid instruction_pointer symbol_and_offset
-  : Event.Location.t
+let parse_location ?perf_maps ~elf ~pid instruction_pointer symbol_and_offset
+  : Event.Location.t Deferred.t
   =
   let instruction_pointer = Util.int64_of_hex_string instruction_pointer in
-  let symbol, symbol_offset =
-    parse_symbol_and_offset ?perf_maps pid symbol_and_offset ~addr:instruction_pointer
+  let%map symbol, inlined_frames, symbol_offset =
+    parse_symbol_and_offset
+      ?perf_maps
+      ~elf
+      pid
+      symbol_and_offset
+      ~addr:instruction_pointer
   in
-  { instruction_pointer; symbol; symbol_offset }
+  { Event.Location.instruction_pointer
+  ; symbol
+  ; symbol_offset
+  ; inlined_frames_outermost_first = inlined_frames
+  }
 ;;
 
-let parse_callstack_entry ?perf_maps (thread : Event.Thread.t) line : Event.Location.t =
+let parse_callstack_entry ?perf_maps ~elf (thread : Event.Thread.t) line
+  : Event.Location.t Deferred.t
+  =
   match Re.Group.all (Re.exec perf_callstack_entry_re line) with
   | [| _; instruction_pointer; symbol_and_offset |] ->
-    parse_location ?perf_maps ~pid:thread.pid instruction_pointer symbol_and_offset
+    parse_location ?perf_maps ~elf ~pid:thread.pid instruction_pointer symbol_and_offset
   | results ->
     raise_s
       [%message
@@ -198,14 +323,25 @@ let parse_callstack_entry ?perf_maps (thread : Event.Thread.t) line : Event.Loca
           (results : string array)]
 ;;
 
-let parse_perf_cycles_event ?perf_maps (thread : Event.Thread.t) time lines : Event.t =
-  let callstack =
-    List.map lines ~f:(parse_callstack_entry ?perf_maps thread) |> List.rev
+let parse_perf_cycles_event ?perf_maps ~elf (thread : Event.Thread.t) time lines
+  : Event.t Deferred.t
+  =
+  let%map callstack_rev =
+    Deferred.List.map
+      ~how:`Parallel
+      lines
+      ~f:(parse_callstack_entry ?perf_maps ~elf thread)
   in
-  Ok { thread; time; data = Stacktrace_sample { callstack } }
+  Result.Ok
+    { Event.Ok.thread
+    ; time
+    ; data = Stacktrace_sample { callstack = List.rev callstack_rev }
+    }
 ;;
 
-let parse_perf_branches_event ?perf_maps (thread : Event.Thread.t) time line : Event.t =
+let parse_perf_branches_event ?perf_maps ~elf (thread : Event.Thread.t) time line
+  : Event.t Deferred.t
+  =
   match Re.Group.all (Re.exec perf_branches_event_re line) with
   | [| _
      ; kind
@@ -216,20 +352,29 @@ let parse_perf_branches_event ?perf_maps (thread : Event.Thread.t) time line : E
     |] ->
     let src_instruction_pointer = Util.int64_of_hex_string src_instruction_pointer in
     let dst_instruction_pointer = Util.int64_of_hex_string dst_instruction_pointer in
-    let src_symbol, src_symbol_offset =
+    let%bind src_symbol, src_inlined_frames, src_symbol_offset =
       parse_symbol_and_offset
         ?perf_maps
+        ~elf
         thread.pid
         src_symbol_and_offset
         ~addr:src_instruction_pointer
     in
-    let dst_symbol, dst_symbol_offset =
+    let%map dst_symbol, dst_inlined_frames, dst_symbol_offset =
       parse_symbol_and_offset
         ?perf_maps
+        ~elf
         thread.pid
         dst_symbol_and_offset
         ~addr:dst_instruction_pointer
     in
+    (*
+       Stdlib.Printf.printf
+       "src frames (%s) = %s, dst frames (%s) = %s\n%!"
+       (Symbol.display_name src_symbol)
+       (Sexp.to_string (List.sexp_of_t Event.Inlined_frame.sexp_of_t src_inlined_frames))
+       (Symbol.display_name dst_symbol)
+       (Sexp.to_string (List.sexp_of_t Event.Inlined_frame.sexp_of_t dst_inlined_frames)); *)
     let starts_trace, kind =
       match String.chop_prefix kind ~prefix:"tr strt" with
       | None -> false, kind
@@ -268,8 +413,8 @@ let parse_perf_branches_event ?perf_maps (thread : Event.Thread.t) time line : E
         printf "Warning: skipping unrecognized perf output: %s\n%!" line;
         None
     in
-    Ok
-      { thread
+    Result.Ok
+      { Event.Ok.thread
       ; time
       ; data =
           Trace
@@ -279,11 +424,13 @@ let parse_perf_branches_event ?perf_maps (thread : Event.Thread.t) time line : E
                 { instruction_pointer = src_instruction_pointer
                 ; symbol = src_symbol
                 ; symbol_offset = src_symbol_offset
+                ; inlined_frames_outermost_first = src_inlined_frames
                 }
             ; dst =
                 { instruction_pointer = dst_instruction_pointer
                 ; symbol = dst_symbol
                 ; symbol_offset = dst_symbol_offset
+                ; inlined_frames_outermost_first = dst_inlined_frames
                 }
             }
       }
@@ -294,66 +441,84 @@ let parse_perf_branches_event ?perf_maps (thread : Event.Thread.t) time line : E
 
 let parse_perf_extra_sampled_event
   ?perf_maps
+  ~elf
   (thread : Event.Thread.t)
   time
   period
   line
   lines
   name
-  : Event.t
+  : Event.t Deferred.t
   =
-  let (location : Event.Location.t) =
+  let%map (location : Event.Location.t) =
     match lines with
     | [] ->
       (match Re.Group.all (Re.exec perf_extra_sampled_event_re line) with
        | [| _str; _; instruction_pointer; symbol_and_offset |] ->
-         parse_location ?perf_maps ~pid:thread.pid instruction_pointer symbol_and_offset
+         parse_location
+           ?perf_maps
+           ~elf
+           ~pid:thread.pid
+           instruction_pointer
+           symbol_and_offset
        | results ->
          raise_s
            [%message
              "Regex of perf event did not match expected fields" (results : string array)])
-    | lines -> List.hd_exn lines |> parse_callstack_entry ?perf_maps thread
+    | lines -> List.hd_exn lines |> parse_callstack_entry ?perf_maps ~elf thread
   in
-  Ok { thread; time; data = Event_sample { location; count = period; name } }
+  Result.Ok
+    { Event.Ok.thread; time; data = Event_sample { location; count = period; name } }
 ;;
 
-let to_event ?perf_maps lines : Event.t option =
+let to_event ?perf_maps ~elf lines : Event.t option Deferred.t =
   try
     match lines with
     | [] -> raise_s [%message "Unexpected line while parsing perf output."]
     | first_line :: lines ->
       let header = parse_event_header first_line in
       (match header with
-       | Trace_error -> Some (Error (trace_error_to_event first_line))
+       | Trace_error -> Deferred.return (Some (Error (trace_error_to_event first_line)))
        | Event { thread; time; period; event; remaining_line } ->
          (match event with
           | `Branches ->
-            Some (parse_perf_branches_event ?perf_maps thread time remaining_line)
+            let%map result =
+              parse_perf_branches_event ?perf_maps ~elf thread time remaining_line
+            in
+            Some result
           | `Cbr ->
             (* cbr (core-to-bus ratio) are events which show frequency changes. *)
-            Some (parse_perf_cbr_event thread time remaining_line)
-          | `Psb -> (* Ignore psb (packet stream boundary) packets *) None
-          | `Cycles -> Some (parse_perf_cycles_event ?perf_maps thread time lines)
+            Deferred.return (Some (parse_perf_cbr_event thread time remaining_line))
+          | `Psb -> (* Ignore psb (packet stream boundary) packets *) Deferred.return None
+          | `Cycles ->
+            let%map result = parse_perf_cycles_event ?perf_maps ~elf thread time lines in
+            Some result
           | `Branch_misses ->
-            Some
-              (parse_perf_extra_sampled_event
-                 ?perf_maps
-                 thread
-                 time
-                 period
-                 remaining_line
-                 lines
-                 Branch_misses)
+            let%map result =
+              parse_perf_extra_sampled_event
+                ?perf_maps
+                ~elf
+                thread
+                time
+                period
+                remaining_line
+                lines
+                Branch_misses
+            in
+            Some result
           | `Cache_misses ->
-            Some
-              (parse_perf_extra_sampled_event
-                 ?perf_maps
-                 thread
-                 time
-                 period
-                 remaining_line
-                 lines
-                 Cache_misses)))
+            let%map result =
+              parse_perf_extra_sampled_event
+                ?perf_maps
+                ~elf
+                thread
+                time
+                period
+                remaining_line
+                lines
+                Cache_misses
+            in
+            Some result))
   with
   | exn ->
     raise_s
@@ -390,13 +555,19 @@ let split_line_pipe pipe : string list Pipe.Reader.t =
   reader
 ;;
 
-let to_events ?perf_maps pipe =
+(* XXX unclear that block_on_async_exn is the right thing here, as may already be in
+   async *)
+let to_event_blocking ?perf_maps ~elf lines : Event.t option =
+  Thread_safe.block_on_async_exn (fun () -> to_event ?perf_maps ~elf lines)
+;;
+
+let to_events ?perf_maps ~elf pipe =
   let pipe = split_line_pipe pipe in
   (* Every route of filtering on streams in an async way seems to be deprecated,
      including converting to pipes which says that the stream creation should be
      switched to a pipe creation. Changing Async_shell is out-of-scope, and I also
      can't see a reason why filter_map would lead to memory leaks. *)
-  Pipe.map pipe ~f:(to_event ?perf_maps) |> Pipe.filter_map ~f:Fn.id
+  Pipe.filter_map' pipe ~f:(to_event ?perf_maps ~elf)
 ;;
 
 let%test_module _ =
@@ -404,7 +575,9 @@ let%test_module _ =
     open Core
 
     let check s =
-      to_event (String.split ~on:'\n' s) |> [%sexp_of: Event.t option] |> print_s
+      to_event_blocking ~elf:None (String.split ~on:'\n' s)
+      |> [%sexp_of: Event.t option]
+      |> print_s
     ;;
 
     let%expect_test "C symbol" =
@@ -414,7 +587,16 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (25375)) (tid (25375)))) (time 52d4h33m11.343298468s)
-           (data (Trace (kind Call) (src 0x7f6fce0b71f4) (dst 0x7ffd193838e0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x7f6fce0b71f4)
+               (symbol (From_perf (symbol __clock_gettime) (demangled_name ())))
+               (symbol_offset 0x24) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x7ffd193838e0)
+               (symbol (From_perf (symbol __vdso_clock_gettime) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "C symbol trace start" =
@@ -424,7 +606,17 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (25375)) (tid (25375)))) (time 52d4h33m11.343298468s)
-           (data (Trace (trace_state_change Start) (src 0x0) (dst 0x7f6fce0b71d0)))))) |}]
+           (data
+            (Trace (trace_state_change Start)
+             (src
+              ((instruction_pointer 0x0)
+               (symbol
+                (From_perf (symbol "[unknown @ 0x0 (foo.so)]") (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x7f6fce0b71d0)
+               (symbol (From_perf (symbol __clock_gettime) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "C++ symbol" =
@@ -434,7 +626,20 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (7166)) (tid (7166)))) (time 52d5h30m23.871133092s)
-           (data (Trace (kind Call) (src 0x9bc6db) (dst 0x9f68b0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x9bc6db)
+               (symbol
+                (From_perf
+                 (symbol "a::B<a::C, a::D<a::E>, a::F, a::F, G::H, a::I>::run")
+                 (demangled_name ())))
+               (symbol_offset 0x1eb) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x9f68b0)
+               (symbol
+                (From_perf (symbol "J::K<int, std::string>") (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "OCaml symbol" =
@@ -444,7 +649,17 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (2017001)) (tid (2017001)))) (time 8d19h30m39.05333667s)
-           (data (Trace (kind Call) (src 0x56234f77576b) (dst 0x56234f4bc7a0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x56234f77576b)
+               (symbol
+                (From_perf (symbol Base.Comparable.=_2352) (demangled_name ())))
+               (symbol_offset 0xb) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x56234f4bc7a0)
+               (symbol (From_perf (symbol caml_apply2) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     (* CR-someday wduff: Leaving this concrete example here for when we support this. See my
@@ -466,7 +681,16 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (2017001)) (tid (2017001)))) (time 8d19h30m39.05333667s)
-           (data (Trace (kind Call) (src 0x56234f77576b) (dst 0x56234f4bc7a0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x56234f77576b)
+               (symbol (From_perf (symbol "x => ") (demangled_name ())))
+               (symbol_offset 0xb) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x56234f4bc7a0)
+               (symbol (From_perf (symbol caml_apply2) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "manufactured example 2" =
@@ -476,7 +700,16 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (2017001)) (tid (2017001)))) (time 8d19h30m39.05333667s)
-           (data (Trace (kind Call) (src 0x56234f77576b) (dst 0x56234f4bc7a0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x56234f77576b)
+               (symbol (From_perf (symbol "x => ") (demangled_name ())))
+               (symbol_offset 0xb) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x56234f4bc7a0)
+               (symbol (From_perf (symbol "=> ") (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "manufactured example 3" =
@@ -486,7 +719,16 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (2017001)) (tid (2017001)))) (time 8d19h30m39.05333667s)
-           (data (Trace (kind Call) (src 0x56234f77576b) (dst 0x56234f4bc7a0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x56234f77576b)
+               (symbol (From_perf (symbol "+ ") (demangled_name ())))
+               (symbol_offset 0xb) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x56234f4bc7a0)
+               (symbol (From_perf (symbol caml_apply2) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "unknown symbol in DSO" =
@@ -496,7 +738,18 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (2017001)) (tid (2017001)))) (time 8d19h30m39.05333667s)
-           (data (Trace (kind Call) (src 0x56234f77576b) (dst 0x56234f4bc7a0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x56234f77576b)
+               (symbol
+                (From_perf (symbol "[unknown @ 0x56234f77576b (foo.so)]")
+                 (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x56234f4bc7a0)
+               (symbol (From_perf (symbol caml_apply2) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "DSO with spaces in it" =
@@ -506,7 +759,19 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (2017001)) (tid (2017001)))) (time 8d19h30m39.05333667s)
-           (data (Trace (kind Call) (src 0x56234f77576b) (dst 0x56234f4bc7a0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x56234f77576b)
+               (symbol
+                (From_perf
+                 (symbol "[unknown @ 0x56234f77576b (this is a spaced dso.so)]")
+                 (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x56234f4bc7a0)
+               (symbol (From_perf (symbol caml_apply2) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "decode error with a timestamp" =
@@ -629,10 +894,55 @@ let%test_module _ =
            (data
             (Stacktrace_sample
              (callstack
-              (0x4008de 0x7f9bd46ae285 0x7f9bd46ae964 0x7f9bd445225e 0x7f9bd44521a2
-               0x7f9bd46ae1e8 0x7f9bd48c9d0c 0x7f9bd44521a2 0x7f9bd48c9ac2
-               0x7f9bd44521a2 0x7f9bd48ca184 0x7f9bd48bf6b0 0x7f9bd48bd18f
-               0x7f9bd48c1d80 -0x68dfef00))))))) |}]
+              (((instruction_pointer 0x4008de)
+                (symbol (From_perf (symbol main) (demangled_name ())))
+                (symbol_offset 0x87) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd46ae285)
+                (symbol (From_perf (symbol dlopen@@GLIBC_2.2.5) (demangled_name ())))
+                (symbol_offset 0x45) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd46ae964)
+                (symbol (From_perf (symbol _dlerror_run) (demangled_name ())))
+                (symbol_offset 0x64) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd445225e)
+                (symbol (From_perf (symbol _dl_catch_error) (demangled_name ())))
+                (symbol_offset 0x2e) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd44521a2)
+                (symbol (From_perf (symbol _dl_catch_exception) (demangled_name ())))
+                (symbol_offset 0x82) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd46ae1e8)
+                (symbol (From_perf (symbol dlopen_doit) (demangled_name ())))
+                (symbol_offset 0x58) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd48c9d0c)
+                (symbol (From_perf (symbol _dl_open) (demangled_name ())))
+                (symbol_offset 0xac) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd44521a2)
+                (symbol (From_perf (symbol _dl_catch_exception) (demangled_name ())))
+                (symbol_offset 0x82) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd48c9ac2)
+                (symbol (From_perf (symbol dl_open_worker) (demangled_name ())))
+                (symbol_offset 0x32) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd44521a2)
+                (symbol (From_perf (symbol _dl_catch_exception) (demangled_name ())))
+                (symbol_offset 0x82) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd48ca184)
+                (symbol
+                 (From_perf (symbol dl_open_worker_begin) (demangled_name ())))
+                (symbol_offset 0xa4) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd48bf6b0)
+                (symbol (From_perf (symbol _dl_map_object) (demangled_name ())))
+                (symbol_offset 0x1e0) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd48bd18f)
+                (symbol
+                 (From_perf (symbol _dl_map_object_from_fd) (demangled_name ())))
+                (symbol_offset 0xb8f) (inlined_frames_outermost_first ()))
+               ((instruction_pointer 0x7f9bd48c1d80)
+                (symbol (From_perf (symbol _dl_setup_hash) (demangled_name ())))
+                (symbol_offset 0x0) (inlined_frames_outermost_first ()))
+               ((instruction_pointer -0x68dfef00)
+                (symbol
+                 (From_perf (symbol "[unknown @ -0x68dfef00 ([unknown])]")
+                  (demangled_name ())))
+                (symbol_offset 0x0) (inlined_frames_outermost_first ()))))))))) |}]
     ;;
 
     let%expect_test "cache-misses event with ipt" =
@@ -645,7 +955,12 @@ let%test_module _ =
         ((Ok
           ((thread ((pid (3871580)) (tid (3871580)))) (time 4d23h38m40.265503976s)
            (data
-            (Event_sample (location 0x7fca9945c595) (count 50) (name Cache_misses)))))) |}]
+            (Event_sample
+             (location
+              ((instruction_pointer 0x7fca9945c595)
+               (symbol (From_perf (symbol __sleep) (demangled_name ())))
+               (symbol_offset 0x55) (inlined_frames_outermost_first ())))
+             (count 50) (name Cache_misses)))))) |}]
     ;;
 
     let%expect_test "cache-misses event with sampling" =
@@ -664,7 +979,12 @@ let%test_module _ =
         ((Ok
           ((thread ((pid (3871580)) (tid (3871580)))) (time 4d23h44m3.387175119s)
            (data
-            (Event_sample (location 0x7fca999481a0) (count 50) (name Cache_misses)))))) |}]
+            (Event_sample
+             (location
+              ((instruction_pointer 0x7fca999481a0)
+               (symbol (From_perf (symbol _dl_unmap) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))
+             (count 50) (name Cache_misses)))))) |}]
     ;;
 
     let%expect_test "branch-misses event with ipt" =
@@ -677,7 +997,12 @@ let%test_module _ =
         ((Ok
           ((thread ((pid (3871580)) (tid (3871580)))) (time 4d23h47m8.52679923s)
            (data
-            (Event_sample (location 0x7fca99943c60) (count 50) (name Branch_misses)))))) |}]
+            (Event_sample
+             (location
+              ((instruction_pointer 0x7fca99943c60)
+               (symbol (From_perf (symbol _dl_open) (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))
+             (count 50) (name Branch_misses)))))) |}]
     ;;
 
     let%expect_test "perf reports a garbage symbol offset" =
@@ -687,7 +1012,41 @@ let%test_module _ =
         {|
         ((Ok
           ((thread ((pid (25375)) (tid (25375)))) (time 52d4h33m11.343298468s)
-           (data (Trace (kind Call) (src 0x7f6fce0b71f4) (dst 0x7ffd193838e0)))))) |}]
+           (data
+            (Trace (kind Call)
+             (src
+              ((instruction_pointer 0x7f6fce0b71f4)
+               (symbol
+                (From_perf (symbol "[unknown @ 0x7f6fce0b71f4 (foo.so)]")
+                 (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x7ffd193838e0)
+               (symbol (From_perf (symbol memcpy@plt) (demangled_name ())))
+               (symbol_offset -0xdd1000) (inlined_frames_outermost_first ())))))))) |}]
+    ;;
+
+    let%expect_test "tr end  async" =
+      check
+        {| 25375/25375 4509191.343298468:                            1   branches:uH:   tr end  async                     7f6fce0b71f4 [unknown] (foo.so) =>     0 [unknown] ([unknown])|};
+      [%expect
+        {|
+        ((Ok
+          ((thread ((pid (25375)) (tid (25375)))) (time 52d4h33m11.343298468s)
+           (data
+            (Trace (trace_state_change End) (kind Async)
+             (src
+              ((instruction_pointer 0x7f6fce0b71f4)
+               (symbol
+                (From_perf (symbol "[unknown @ 0x7f6fce0b71f4 (foo.so)]")
+                 (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))
+             (dst
+              ((instruction_pointer 0x0)
+               (symbol
+                (From_perf (symbol "[unknown @ 0x0 ([unknown])]")
+                 (demangled_name ())))
+               (symbol_offset 0x0) (inlined_frames_outermost_first ())))))))) |}]
     ;;
 
     let%expect_test "tr end  async" =
@@ -705,6 +1064,6 @@ let%test_module _ =
 ;;
 
 module For_testing = struct
-  let to_event = to_event
+  let to_event = to_event_blocking ~elf:None
   let split_line_pipe = split_line_pipe
 end

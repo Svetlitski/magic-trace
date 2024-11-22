@@ -468,6 +468,7 @@ let decode_events
   ~(recording_data : Recording.Data.t option)
   ~record_dir
   ~(collection_mode : Collection_mode.t)
+  ~elf
   ()
   =
   let%bind capabilities = Perf_capabilities.detect_exn () in
@@ -524,7 +525,7 @@ let decode_events
         (Reader.transfer
            (Process.stderr perf_script_proc)
            (Writer.pipe (force Writer.stderr)));
-      let events = Perf_decode.to_events ?perf_maps line_pipe in
+      let events = Perf_decode.to_events ?perf_maps ~elf line_pipe in
       let close_result =
         let%map exit_or_signal = Process.wait perf_script_proc in
         perf_exit_to_or_error exit_or_signal
