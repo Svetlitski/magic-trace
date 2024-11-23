@@ -31,8 +31,6 @@ module Inlined_frame = struct
   [@@deriving sexp, fields, bin_io, compare]
 
   let display_name { demangled_name; _ } = demangled_name ^ " [inlined]"
-  (*    Printf.sprintf "%s (%s:%d,%d) [inlined]"
-        demangled_name filename line column *)
 end
 
 module Location = struct
