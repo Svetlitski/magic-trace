@@ -1,22 +1,25 @@
 #include <cstdint>
+#include <cstring>
 
 #include "caml/alloc.h"
 #include "caml/memory.h"
 #include "caml/mlvalues.h"
 #include "llvm/include/llvm/DebugInfo/Symbolize/Symbolize.h"
 
-llvm::symbolize::LLVMSymbolizer symbolizer{{.UseSymbolTable = false}};
 namespace {
+llvm::symbolize::LLVMSymbolizer symbolizer{{.UseSymbolTable = false}};
+
 value ocaml_string_of_cpp_string(const std::string &string) {
   return caml_alloc_initialized_string(string.length(), string.data());
 }
 } // namespace
 
+// Corresponds to [Event.Inlined_frame.t]
 struct inlined_frame {
   value demangled_name /* : string */;
   value filename /* : string */;
   value line /* : int */;
-  value column /* : column */;
+  value column /* : int */;
 };
 
 extern "C" {
@@ -24,8 +27,7 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
                                                   value v_address) {
   // [v_address] is always an integer, so no need to mention it in [CAMLparam*].
   CAMLparam1(v_executable_file);
-  CAMLlocal5(function_names, function_names_option, filename, demangled_name,
-             inlined_frame);
+  CAMLlocal4(function_names, filename, demangled_name, inlined_frame);
   std::string executable_file{String_val(v_executable_file),
                               caml_string_length(v_executable_file)};
   llvm::object::SectionedAddress address{(uintptr_t)(Long_val(v_address)),
@@ -36,7 +38,7 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
   }
   const auto &frames = result.get();
   const uint32_t num_frames = frames.getNumberOfFrames();
-  if (num_frames < Max_young_wosize) {
+  if (num_frames <= Max_young_wosize) [[likely]] {
     function_names = caml_alloc_small(/*wosize=*/num_frames, /*tag=*/0);
     memset((uint8_t *)function_names, 0xFF, sizeof(value) * num_frames);
   } else {
@@ -49,15 +51,17 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
     const auto &frame = frames.getFrame(i);
     filename = ocaml_string_of_cpp_string(frame.FileName);
     demangled_name = ocaml_string_of_cpp_string(frame.FunctionName);
-    struct inlined_frame *inlined_frame = (struct inlined_frame *)caml_alloc_small(
-        /*wosize=*/Wsize_bsize(sizeof(struct inlined_frame)), /*tag=*/0);
+    constexpr mlsize_t inlined_frame_wosize = Wsize_bsize(sizeof(struct inlined_frame));
+    static_assert(inlined_frame_wosize <= Max_young_wosize);
+    struct inlined_frame *inlined_frame =
+        (struct inlined_frame *)caml_alloc_small(inlined_frame_wosize, /*tag=*/0);
     inlined_frame->demangled_name = demangled_name;
     inlined_frame->filename = filename;
     inlined_frame->line = Val_long(frame.Line);
     inlined_frame->column = Val_long(frame.Column);
     caml_modify(&Field(function_names, num_frames - 1 - i), (value)inlined_frame);
   }
-  function_names_option = caml_alloc_some(function_names);
-  CAMLreturn(function_names_option);
+  function_names = caml_alloc_some(function_names);
+  CAMLreturn(function_names);
 }
 }
