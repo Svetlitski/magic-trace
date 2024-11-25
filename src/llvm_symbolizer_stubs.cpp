@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 
 #include "caml/alloc.h"
 #include "caml/memory.h"
@@ -12,6 +13,35 @@ llvm::symbolize::LLVMSymbolizer symbolizer{{.UseSymbolTable = false}};
 value ocaml_string_of_cpp_string(const std::string &string) {
   return caml_alloc_initialized_string(string.length(), string.data());
 }
+
+value ext_ocaml_string_of_cpp_string(const std::string &string) {
+  size_t len = string.length();
+  // [wosize] is the size of the string in words, including padding but not
+  // including the header.
+  mlsize_t wosize = (len + sizeof(value)) / sizeof(value);
+  // allocate [(wosize + 1)] words to include the header */
+  value *ext_ocaml_string = (value *)malloc(Whsize_wosize(wosize) * sizeof(value));
+  ext_ocaml_string[0] = Caml_out_of_heap_header(wosize, String_tag);
+  value result = Val_hp(ext_ocaml_string);
+  // Initialize the padding at the end of the string
+  Field(result, wosize - 1) = 0;
+  mlsize_t offset_index = Bsize_wsize(wosize) - 1;
+  Byte(result, offset_index) = offset_index - len;
+  memcpy(Bytes_val(result), string.data(), len);
+  return result;
+}
+
+value ext_ocaml_string_of_filename(const std::string &filename) {
+  static std::unordered_map<std::string, value> filename_ocaml_string_cache{};
+  const auto &result = filename_ocaml_string_cache.find(filename);
+  if (result != filename_ocaml_string_cache.end()) {
+    return result->second;
+  }
+  value ext_ocaml_string = ext_ocaml_string_of_cpp_string(filename);
+  filename_ocaml_string_cache.insert({filename, ext_ocaml_string});
+  return ext_ocaml_string;
+}
+
 } // namespace
 
 // Corresponds to [Event.Inlined_frame.t]
@@ -31,7 +61,7 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
   // we ever make any allocations on the OCaml heap, so we can get away with not needing
   // to register it with [CAMLparam*].
   CAMLparam0();
-  CAMLlocal4(inlined_frames, filename, demangled_name, inlined_frame);
+  CAMLlocal3(inlined_frames, demangled_name, inlined_frame);
   std::string executable_file{String_val(v_executable_file),
                               caml_string_length(v_executable_file)};
   llvm::object::SectionedAddress sectioned_address{
@@ -50,7 +80,7 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
   memset((uint8_t *)inlined_frames, 0xFF, Bsize_wsize(num_frames));
   for (uint32_t i = 0; i < num_frames; i++) {
     const auto &frame = frames.getFrame(i);
-    filename = ocaml_string_of_cpp_string(frame.FileName);
+    value filename = ext_ocaml_string_of_filename(frame.FileName);
     demangled_name = ocaml_string_of_cpp_string(frame.FunctionName);
     constexpr mlsize_t inlined_frame_wosize = Wsize_bsize(sizeof(struct inlined_frame));
     static_assert(inlined_frame_wosize <= Max_young_wosize);

@@ -16,7 +16,7 @@
   (deps    llvm_symbolizer_stubs.cpp)
   (action (
     progn
-    (run clang++ -DCAML_NAME_SPACE -I %{ocaml_where} -I llvm/include -O3 -march=haswell -mtune=skylake -fPIC -flto=thin -c llvm_symbolizer_stubs.cpp)
+    (run clang++ --gcc-install-dir=/usr/lib/gcc/x86_64-redhat-linux/8/ -DCAML_NAME_SPACE -I %{ocaml_where} -I llvm/include -O3 -march=haswell -mtune=skylake -fPIC -flto=thin -c llvm_symbolizer_stubs.cpp)
     (run
      ld.lld
      -static
