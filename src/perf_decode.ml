@@ -109,19 +109,43 @@ let parse_event_header line =
           "Regex of perf output did not match expected fields" (results : string array)])
 ;;
 
-external symbolize
-  :  executable:Filename.t
-  -> addr:(Int64.t [@unboxed])
-  -> Event.Inlined_frame.t array option
-  = 
-  "magic_trace_llvm_symbolize_address_bytecode"
-  "magic_trace_llvm_symbolize_address"
+module Symbolizer : sig
+  val symbolize
+    :  executable:Filename.t
+    -> addr:Int64.t
+    -> Event.Inlined_frame.t array option
+end = struct
+  module Request = struct
+    type t =
+      { addr : Int64.t
+      ; executable : Filename.t
+      }
+    [@@deriving compare, sexp_of, hash]
+  end
+
+  external symbolize
+    :  executable:Filename.t
+    -> addr:(Int64.t[@unboxed])
+    -> Event.Inlined_frame.t array option
+    = "magic_trace_llvm_symbolize_address_bytecode" "magic_trace_llvm_symbolize_address"
+
+  let (symbolization_cache : (Request.t, Event.Inlined_frame.t array option) Hashtbl.t) =
+    Hashtbl.create (module Request)
+  ;;
+
+  let symbolize ~executable ~addr =
+    (Hashtbl.find_or_add [@inlined hint])
+      symbolization_cache
+      { addr; executable }
+      ~default:(fun () -> symbolize ~executable ~addr)
+  ;;
+end
 
 let resolve_inlined_frames ~elf ~addr ~symbol
   : (Symbol.t * Event.Inlined_frame.t array) option
   =
   let executable = Elf.executable_file elf in
-  match symbolize ~executable ~addr with
+  match Symbolizer.symbolize ~executable ~addr with
   | None | Some [||] -> None
   | Some inlined_frames ->
     let demangled_name = (Array.unsafe_get inlined_frames 0).demangled_name in
@@ -787,7 +811,8 @@ let%test_module _ =
         "2937048/2937048 448556.689403475:                             1          \
          psb:                        psb offs: 0x4be8                                \
          0     7f068fbfd330 mmap64+0x50 (/usr/lib64/ld-2.28.so)";
-      [%expect {|
+      [%expect
+        {|
         () |}]
     ;;
 
