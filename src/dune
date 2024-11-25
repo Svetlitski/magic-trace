@@ -13,7 +13,28 @@
 
 (rule
   (targets libLLVM.a)
-  (deps    llvm_symbolizer_stubs.cpp)
+  (deps llvm_symbolizer_stubs.cpp
+   (:llvm_static_libraries
+    llvm/libLLVMSymbolize.a
+    llvm/libLLVMDebugInfoBTF.a
+    llvm/libLLVMDebugInfoPDB.a
+    llvm/libLLVMDebugInfoMSF.a
+    llvm/libLLVMDebugInfoDWARF.a
+    llvm/libLLVMObject.a
+    llvm/libLLVMTextAPI.a
+    llvm/libLLVMMCParser.a
+    llvm/libLLVMIRReader.a
+    llvm/libLLVMAsmParser.a
+    llvm/libLLVMMC.a
+    llvm/libLLVMDebugInfoCodeView.a
+    llvm/libLLVMBitReader.a
+    llvm/libLLVMCore.a
+    llvm/libLLVMRemarks.a
+    llvm/libLLVMBitstreamReader.a
+    llvm/libLLVMBinaryFormat.a
+    llvm/libLLVMTargetParser.a
+    llvm/libLLVMSupport.a
+    llvm/libLLVMDemangle.a))
   (action (
     progn
     (run clang++ --gcc-install-dir=/usr/lib/gcc/x86_64-redhat-linux/8/ -DCAML_NAME_SPACE -I %{ocaml_where} -I llvm/include -O3 -march=haswell -mtune=skylake -fPIC -flto=thin -c llvm_symbolizer_stubs.cpp)
@@ -27,27 +48,7 @@
      --hash-style=gnu
      --build-id
      --start-lib
-     llvm/libLLVMSymbolize.a
-     llvm/libLLVMDebugInfoBTF.a
-     llvm/libLLVMDebugInfoPDB.a
-     llvm/libLLVMDebugInfoMSF.a
-     llvm/libLLVMDebugInfoDWARF.a
-     llvm/libLLVMOption.a
-     llvm/libLLVMObject.a
-     llvm/libLLVMTextAPI.a
-     llvm/libLLVMMCParser.a
-     llvm/libLLVMIRReader.a
-     llvm/libLLVMAsmParser.a
-     llvm/libLLVMMC.a
-     llvm/libLLVMDebugInfoCodeView.a
-     llvm/libLLVMBitReader.a
-     llvm/libLLVMCore.a
-     llvm/libLLVMRemarks.a
-     llvm/libLLVMBinaryFormat.a
-     llvm/libLLVMTargetParser.a
-     llvm/libLLVMBitstreamReader.a
-     llvm/libLLVMSupport.a
-     llvm/libLLVMDemangle.a
+     %{llvm_static_libraries}
      --end-lib
      llvm_symbolizer_stubs.o
      -o

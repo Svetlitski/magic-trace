@@ -7,7 +7,7 @@
 #include "caml/alloc.h"
 #include "caml/memory.h"
 #include "caml/mlvalues.h"
-#include "llvm/include/llvm/DebugInfo/Symbolize/Symbolize.h"
+#include "llvm/DebugInfo/Symbolize/Symbolize.h"
 
 namespace {
 llvm::symbolize::LLVMSymbolizer symbolizer{{.UseSymbolTable = false}};
