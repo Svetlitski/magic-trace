@@ -1,6 +1,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <string>
+#include <unordered_map>
 
 #include "caml/alloc.h"
 #include "caml/memory.h"
