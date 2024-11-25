@@ -23,12 +23,12 @@ end
 
 module Inlined_frame : sig
   type t =
-    { demangled_name : string
-    ; filename : string
-    ; line : int
+    { line : int
     ; column : int
+    ; demangled_name : string
+    ; filename : string
     }
-  [@@deriving sexp, fields, bin_io, compare]
+  [@@deriving sexp, fields, bin_io, compare, equal]
 
   val display_name : t -> string
 end

@@ -13,13 +13,13 @@ value ocaml_string_of_cpp_string(const std::string &string) {
   return caml_alloc_initialized_string(string.length(), string.data());
 }
 } // namespace
-  
+
 // Corresponds to [Event.Inlined_frame.t]
 struct inlined_frame {
-  value demangled_name /* : string */;
-  value filename /* : string */;
   value line /* : int */;
   value column /* : int */;
+  value demangled_name /* : string */;
+  value filename /* : string */;
 };
 
 extern "C" {
@@ -56,10 +56,12 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
     static_assert(inlined_frame_wosize <= Max_young_wosize);
     auto *inlined_frame =
         (struct inlined_frame *)caml_alloc_small(inlined_frame_wosize, /*tag=*/0);
-    *inlined_frame = (struct inlined_frame){.demangled_name = demangled_name,
-                                            .filename = filename,
-                                            .line = Val_long(frame.Line),
-                                            .column = Val_long(frame.Column)};
+    *inlined_frame = (struct inlined_frame){
+        .line = Val_long(frame.Line),
+        .column = Val_long(frame.Column),
+        .demangled_name = demangled_name,
+        .filename = filename,
+    };
     caml_modify(&Field(inlined_frames, num_frames - 1 - i), (value)inlined_frame);
   }
   inlined_frames = caml_alloc_some(inlined_frames);

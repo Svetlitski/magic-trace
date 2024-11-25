@@ -22,13 +22,15 @@ module Thread = struct
 end
 
 module Inlined_frame = struct
+  (* We put the immediate fields first to make [compare]/[equal] a bit faster
+     in the case where the two values being compared aren't equal. *)
   type t =
-    { demangled_name : string
-    ; filename : string
-    ; line : int
+    { line : int
     ; column : int
+    ; demangled_name : string
+    ; filename : string
     }
-  [@@deriving sexp, fields, bin_io, compare]
+  [@@deriving sexp, fields, bin_io, compare, equal]
 
   let display_name { demangled_name; _ } = demangled_name ^ " [inlined]"
 end

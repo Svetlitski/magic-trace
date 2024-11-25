@@ -832,7 +832,7 @@ let emit_inlined_frame_adjustments
       let i = ref 0 in
       while
         !i < min_len
-        && [%compare.equal: Event.Inlined_frame.t]
+        && Event.Inlined_frame.equal
              (Array.unsafe_get prev_frames !i)
              (Array.unsafe_get new_frames !i)
       do
