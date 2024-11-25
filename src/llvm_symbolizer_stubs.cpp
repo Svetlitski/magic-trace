@@ -13,7 +13,7 @@ value ocaml_string_of_cpp_string(const std::string &string) {
   return caml_alloc_initialized_string(string.length(), string.data());
 }
 } // namespace
-
+  
 // Corresponds to [Event.Inlined_frame.t]
 struct inlined_frame {
   value demangled_name /* : string */;
@@ -24,29 +24,30 @@ struct inlined_frame {
 
 extern "C" {
 CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
-                                                  value v_address) {
-  // [v_address] is always an integer, so no need to mention it in [CAMLparam*]
-  CAMLparam1(v_executable_file);
-  CAMLlocal4(function_names, filename, demangled_name, inlined_frame);
+                                                  uintptr_t address) {
+  // [symbolizeInlinedCode] takes a [const std::string&] and not a [std::string_view]
+  // or similar, so we *have* to copy it from the OCaml string first, which is a little
+  // sad. However, as a consequence this means only ever read [v_executable_file] before
+  // we ever make any allocations on the OCaml heap, so we can get away with not needing
+  // to register it with [CAMLparam*].
+  CAMLparam0();
+  CAMLlocal4(inlined_frames, filename, demangled_name, inlined_frame);
   std::string executable_file{String_val(v_executable_file),
                               caml_string_length(v_executable_file)};
-  llvm::object::SectionedAddress address{(uintptr_t)(Long_val(v_address)),
-                                         llvm::object::SectionedAddress::UndefSection};
-  auto result = symbolizer.symbolizeInlinedCode(executable_file, address);
+  llvm::object::SectionedAddress sectioned_address{
+      address, llvm::object::SectionedAddress::UndefSection};
+  auto result = symbolizer.symbolizeInlinedCode(executable_file, sectioned_address);
   if (auto error = result.takeError()) {
     CAMLreturn(Val_none);
   }
   const auto &frames = result.get();
   const uint32_t num_frames = frames.getNumberOfFrames();
   if (num_frames <= Max_young_wosize) [[likely]] {
-    function_names = caml_alloc_small(/*wosize=*/num_frames, /*tag=*/0);
-    memset((uint8_t *)function_names, 0xFF, sizeof(value) * num_frames);
+    inlined_frames = caml_alloc_small(/*wosize=*/num_frames, /*tag=*/0);
   } else {
-    function_names = caml_alloc_shr(/*wosize=*/num_frames, /*tag=*/0);
-    for (uint32_t i = 0; i < num_frames; i++) {
-      caml_initialize(&Field(function_names, i), Val_unit);
-    }
+    inlined_frames = caml_alloc_shr(/*wosize=*/num_frames, /*tag=*/0);
   }
+  memset((uint8_t *)inlined_frames, 0xFF, Bsize_wsize(num_frames));
   for (uint32_t i = 0; i < num_frames; i++) {
     const auto &frame = frames.getFrame(i);
     filename = ocaml_string_of_cpp_string(frame.FileName);
@@ -59,9 +60,14 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
                                             .filename = filename,
                                             .line = Val_long(frame.Line),
                                             .column = Val_long(frame.Column)};
-    caml_modify(&Field(function_names, num_frames - 1 - i), (value)inlined_frame);
+    caml_modify(&Field(inlined_frames, num_frames - 1 - i), (value)inlined_frame);
   }
-  function_names = caml_alloc_some(function_names);
-  CAMLreturn(function_names);
+  inlined_frames = caml_alloc_some(inlined_frames);
+  CAMLreturn(inlined_frames);
+}
+
+CAMLprim value magic_trace_llvm_symbolize_address_bytecode(value v_executable_file,
+                                                           value v_address) {
+  return magic_trace_llvm_symbolize_address(v_executable_file, Field(v_address, 0));
 }
 }

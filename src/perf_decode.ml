@@ -111,15 +111,16 @@ let parse_event_header line =
 
 external symbolize
   :  executable:Filename.t
-  -> addr:int
+  -> addr:(Int64.t [@unboxed])
   -> Event.Inlined_frame.t array option
-  = "magic_trace_llvm_symbolize_address"
+  = 
+  "magic_trace_llvm_symbolize_address_bytecode"
+  "magic_trace_llvm_symbolize_address"
 
 let resolve_inlined_frames ~elf ~addr ~symbol
   : (Symbol.t * Event.Inlined_frame.t array) option
   =
   let executable = Elf.executable_file elf in
-  let addr = Int64.to_int_trunc addr in
   match symbolize ~executable ~addr with
   | None | Some [||] -> None
   | Some inlined_frames ->
