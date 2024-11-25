@@ -16,7 +16,7 @@
   (deps    llvm_symbolizer_stubs.cpp)
   (action (
     progn
-    (run clang++ -DCAML_NAME_SPACE -I %{ocaml_where} -I llvm/include -O3 -march=haswell -mtune=skylake -fPIC -fno-rtti -flto=thin -c llvm_symbolizer_stubs.cpp)
+    (run clang++ -DCAML_NAME_SPACE -I %{ocaml_where} -I llvm/include -O3 -march=haswell -mtune=skylake -fPIC -flto=thin -c llvm_symbolizer_stubs.cpp)
     (run
      ld.lld
      -static
@@ -52,7 +52,7 @@
      llvm_symbolizer_stubs.o
      -o
      libLLVM.o)
-    (run llvm-strip --keep-symbol=magic_trace_llvm_symbolize_address libLLVM.o)
+    (run llvm-strip --strip-debug libLLVM.o)
     (run llvm-ar Drcs %{targets} libLLVM.o))))
 
 (library
