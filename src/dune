@@ -5,8 +5,8 @@
  (action
   (progn
    (run mkdir -p dlfilter)
-   (run %{bin:gcc} -c -fPIC %{dep})
-   (run %{bin:gcc} -shared -fPIC -o dlfilter/perf_dlfilter.so perf_dlfilter.o)
+   (run %{bin:gcc} -c -fpic %{dep})
+   (run %{bin:gcc} -shared -o dlfilter/perf_dlfilter.so perf_dlfilter.o)
    (run %{bin:ocaml-crunch} -m plain dlfilter -o perf_dlfilter.ml))))
 
 (data_only_dirs llvm)
