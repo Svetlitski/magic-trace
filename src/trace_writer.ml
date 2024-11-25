@@ -1,7 +1,6 @@
 open! Core
 
 let debug = ref false
-let debug2 = false
 let is_kernel_address addr = Int64.(addr < 0L)
 
 (* Time spans from perf start whenever the machine booted. Perfetto uses floats to represent time
@@ -703,9 +702,7 @@ let rec clear_callstack t (thread_info : _ Thread_info.t) ~time =
 ;;
 
 let clear_callstack t thread_info ~time caller =
-  if debug2 then Stdlib.Printf.eprintf "*** clear_callstack %s\n%!" caller;
   clear_callstack t thread_info ~time;
-  if debug2 then Stdlib.Printf.eprintf "*** clear_callstack finished\n%!"
 ;;
 
 (* Unlike [clear_callstack], [clear_all_callstacks] also returns from all inactive
@@ -819,14 +816,6 @@ let emit_inlined_frame_adjustments
   in
   if different_inlined_frames
   then (
-    if debug2
-    then
-      Stdlib.Printf.printf
-        "prev frames = %s, new frames = %s\n%!"
-        (Sexp.to_string
-           (Array.sexp_of_t Event.Inlined_frame.sexp_of_t previous_inlined_frames))
-        (Sexp.to_string
-           (Array.sexp_of_t Event.Inlined_frame.sexp_of_t new_inlined_frames));
     let chop_common_prefix prev_frames new_frames =
       let min_len = Int.min (Array.length prev_frames) (Array.length new_frames) in
       let i = ref 0 in
@@ -847,16 +836,6 @@ let emit_inlined_frame_adjustments
     let prev_frames_to_pop, new_frames_to_push =
       chop_common_prefix previous_inlined_frames new_inlined_frames
     in
-    if debug2
-    then (
-      Stdlib.Printf.printf
-        "to pop: %s\n%!"
-        (Sexp.to_string
-           (Array.sexp_of_t Event.Inlined_frame.sexp_of_t prev_frames_to_pop));
-      Stdlib.Printf.printf
-        "to push: %s\n%!"
-        (Sexp.to_string
-           (Array.sexp_of_t Event.Inlined_frame.sexp_of_t new_frames_to_push)));
     (* Same function in terms of program counter, but different inlining
        stacks; make the necessary adjustments. *)
     array_iter_rev prev_frames_to_pop ~f:(fun frame ->
@@ -902,11 +881,6 @@ let check_current_symbol
         ~time;
       let (_ : Event.Location.t option) = Callstack.pop thread_info.callstack in
       let loc = { loc with inlined_frames_outermost_first = new_inlined_frames } in
-      if debug2
-      then
-        Stdlib.Printf.printf
-          "new location = %s\n%!"
-          (Sexp.to_string (Event.Location.sexp_of_t loc));
       Callstack.push thread_info.callstack loc)
   | None ->
     (* If we have no callstack left, then we just returned out of something we didn't
@@ -990,7 +964,6 @@ end = struct
   ;;
 
   let clear_trap_stack t thread_info ~time =
-    if debug2 then Stdlib.Printf.eprintf "CLEAR_TRAP_STACK\n%!";
     clear_callstack t thread_info ~time "clear_trap_stack";
     match Stack.pop thread_info.inactive_callstacks with
     | Some callstack -> thread_info.callstack <- callstack
@@ -1003,7 +976,6 @@ end = struct
     ~time
     (dst : Event.Location.t)
     =
-    if debug2 then Stdlib.Printf.eprintf "CHECK_CURRENT_SYMBOL_TRACK_ENTERTRAPS\n%!";
     match thread_info.ocaml_exception_state with
     | With_exception_info { ocaml_exception_info; _ }
       when Ocaml_exception_info.is_entertrap
