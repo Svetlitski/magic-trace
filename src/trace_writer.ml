@@ -433,10 +433,8 @@ let write_pending_event'
       then display_name ^ " [inferred start time]"
       else display_name
     in
-    (*Stdlib.Printf.eprintf "Call: %s\n" display_name; *)
     write_duration_begin t ~thread:thread.thread ~name ~time ~args
   | Ret ->
-    (*    Stdlib.Printf.eprintf "Ret: %s\n" display_name; *)
     write_duration_end t ~name:display_name ~time ~thread:thread.thread ~args:[]
   | Ret_from_untraced { reset_time } ->
     write_duration_complete
@@ -462,10 +460,6 @@ let write_pending_event'
     in
     let args = args @ inferred_start_time_arg in
     let display_name = name_for_inlined_frame frame in
-    (*    Stdlib.Printf.eprintf
-          "Inlined call (%s): %s\n"
-          reason
-          (Sexp.to_string (Event.Inlined_frame.sexp_of_t frame)); *)
     let name =
       if t.annotate_inferred_start_times && from_untraced
       then display_name ^ " [inferred start time]"
@@ -474,7 +468,6 @@ let write_pending_event'
     write_duration_begin t ~thread:thread.thread ~name ~time ~args
   | Inlined_ret { inlined_frame = frame; reason } ->
     let on_stack = Stack.pop t.inlining_stack in
-    let _err = Printf.sprintf "%s (%s)" (name_for_inlined_frame frame) reason in
     (* temporarily off
        (match on_stack with
        | None ->
@@ -491,7 +484,6 @@ let write_pending_event'
        (Sexp.to_string (Event.Inlined_frame.sexp_of_t on_stack))
        (Sexp.to_string (Event.Inlined_frame.sexp_of_t frame))
        ()); *)
-    (*    Stdlib.Printf.eprintf "Inlined_ret (%s): %s\n" reason (name_for_inlined_frame frame); *)
     if Option.is_some on_stack
     then
       write_duration_end
@@ -701,14 +693,14 @@ let rec clear_callstack t (thread_info : _ Thread_info.t) ~time =
     clear_callstack t thread_info ~time
 ;;
 
-let clear_callstack t thread_info ~time caller =
+let clear_callstack t thread_info ~time  =
   clear_callstack t thread_info ~time;
 ;;
 
 (* Unlike [clear_callstack], [clear_all_callstacks] also returns from all inactive
    callstacks. *)
 let rec clear_all_callstacks t thread_info ~time =
-  clear_callstack t thread_info ~time "clear_all_callstacks";
+  clear_callstack t thread_info ~time;
   match Stack.pop thread_info.inactive_callstacks with
   | None -> ()
   | Some callstack ->
@@ -964,7 +956,7 @@ end = struct
   ;;
 
   let clear_trap_stack t thread_info ~time =
-    clear_callstack t thread_info ~time "clear_trap_stack";
+    clear_callstack t thread_info ~time;
     match Stack.pop thread_info.inactive_callstacks with
     | Some callstack -> thread_info.callstack <- callstack
     | None -> thread_info.callstack <- Callstack.create ~create_time:time
@@ -1351,7 +1343,7 @@ let write_event (T t) ?events_writer event =
             (* We're back in the kernel after having been in userspace. We have a
                brand new stack to work with. [clear_callstack] here should only be
                clearing the [untraced] frame here pushed by [End (Iret | Sysret)]. *)
-            clear_callstack t thread_info ~time "1289";
+            clear_callstack t thread_info ~time;
             Thread_info.set_callstack_from_addr
               thread_info
               ~addr:dst.instruction_pointer
@@ -1394,7 +1386,7 @@ let write_event (T t) ?events_writer event =
         | Some (Iret | Sysret), Some End ->
           (* We should only be getting these under /k *)
           assert_trace_scope t outer_event [ Kernel ];
-          clear_callstack t thread_info ~time "1332";
+          clear_callstack t thread_info ~time;
           call t thread_info ~time ~location:Event.Location.untraced
         | Some ((Iret | Sysret) as kind), None ->
           (* We should only get [Sysret] under /uk, but might get [Iret] under /k as
@@ -1404,7 +1396,7 @@ let write_event (T t) ?events_writer event =
           ]
           |> List.concat
           |> assert_trace_scope t outer_event;
-          clear_callstack t thread_info ~time "1342";
+          clear_callstack t thread_info ~time;
           (match Stack.pop thread_info.inactive_callstacks with
            | Some callstack -> thread_info.callstack <- callstack
            | None ->
