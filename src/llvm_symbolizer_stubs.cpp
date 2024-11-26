@@ -69,7 +69,7 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
   llvm::object::SectionedAddress sectioned_address{
       address, llvm::object::SectionedAddress::UndefSection};
   auto result = symbolizer.symbolizeInlinedCode(executable_file, sectioned_address);
-  if (auto error = result.takeError()) {
+  if (!result || result->getNumberOfFrames() == 0) {
     CAMLreturn(Val_none);
   }
   const auto &frames = result.get();

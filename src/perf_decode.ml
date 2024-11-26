@@ -146,7 +146,13 @@ let resolve_inlined_frames ~elf ~addr ~symbol
   =
   let executable = Elf.executable_file elf in
   match Symbolizer.symbolize ~executable ~addr with
-  | None | Some [||] -> None
+  | None -> None
+  | Some [||] -> assert false
+  | Some [| frame |] ->
+    let symbol =
+      Symbol.From_perf { symbol; demangled_name = Some frame.demangled_name }
+    in
+    Some (symbol, [||])
   | Some inlined_frames ->
     let demangled_name = (Array.unsafe_get inlined_frames 0).demangled_name in
     let symbol = Symbol.From_perf { symbol; demangled_name = Some demangled_name } in
