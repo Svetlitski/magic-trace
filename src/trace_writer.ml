@@ -884,6 +884,7 @@ let check_current_symbol
        time. *)
     let ev = Pending_event.create_call location ~from_untraced:true in
     write_pending_event t thread_info thread_info.callstack.create_time ev;
+    (*
     let new_inlined_frames = location.inlined_frames_outermost_first in
     Array.iter new_inlined_frames ~f:(fun frame ->
       let ev =
@@ -893,7 +894,8 @@ let check_current_symbol
           "check_current_symbol None case"
       in
       write_pending_event t thread_info time ev);
-    Callstack.push thread_info.callstack location
+    *)
+    Callstack.push thread_info.callstack {location with inlined_frames_outermost_first = [||]}
 ;;
 
 (* OCaml-specific hacks around tracking exception control flow. Supports two
