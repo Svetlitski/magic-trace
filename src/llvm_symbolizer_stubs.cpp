@@ -54,6 +54,12 @@ struct inlined_frame {
   value filename /* : string */;
 };
 
+// Corresponds to [Perf_decode.Symbolizer.Response.t]
+struct response {
+  value demangled_name /* : string */;
+  value inlined_frames /* Event.Inlined_frame.t array */;
+};
+
 extern "C" {
 CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
                                                   uintptr_t address) {
@@ -63,7 +69,7 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
   // we ever make any allocations on the OCaml heap, so we can get away with not needing
   // to register it with [CAMLparam*].
   CAMLparam0();
-  CAMLlocal3(inlined_frames, demangled_name, inlined_frame);
+  CAMLlocal4(inlined_frames, demangled_name, inlined_frame, response);
   std::string executable_file{String_val(v_executable_file),
                               caml_string_length(v_executable_file)};
   llvm::object::SectionedAddress sectioned_address{
@@ -73,31 +79,42 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
     CAMLreturn(Val_none);
   }
   const auto &frames = result.get();
-  const uint32_t num_frames = frames.getNumberOfFrames();
-  if (num_frames <= Max_young_wosize) [[likely]] {
-    inlined_frames = caml_alloc_small(/*wosize=*/num_frames, /*tag=*/0);
+  const uint32_t num_inlined_frames = frames.getNumberOfFrames() - 1;
+  if (num_inlined_frames == 0) {
+    inlined_frames = Atom(0);
   } else {
-    inlined_frames = caml_alloc_shr(/*wosize=*/num_frames, /*tag=*/0);
+    if (num_inlined_frames <= Max_young_wosize) [[likely]] {
+      inlined_frames = caml_alloc_small(/*wosize=*/num_inlined_frames, /*tag=*/0);
+    } else {
+      inlined_frames = caml_alloc_shr(/*wosize=*/num_inlined_frames, /*tag=*/0);
+    }
+    memset((uint8_t *)inlined_frames, 0xFF, Bsize_wsize(num_inlined_frames));
+    for (uint32_t i = 0; i < num_inlined_frames; i++) {
+      const auto &frame = frames.getFrame(i);
+      value filename = ext_ocaml_string_of_filename(frame.FileName);
+      demangled_name = ocaml_string_of_cpp_string(frame.FunctionName);
+      constexpr mlsize_t inlined_frame_wosize = Wsize_bsize(sizeof(struct inlined_frame));
+      static_assert(inlined_frame_wosize <= Max_young_wosize);
+      inlined_frame = caml_alloc_small(inlined_frame_wosize, /*tag=*/0);
+      auto *inlined_frame_ptr = (struct inlined_frame *)inlined_frame;
+      *inlined_frame_ptr = (struct inlined_frame){
+          .line = Val_long(frame.Line),
+          .column = Val_long(frame.Column),
+          .demangled_name = demangled_name,
+          .filename = filename,
+      };
+      caml_modify(&Field(inlined_frames, num_inlined_frames - 1 - i),
+                  (value)inlined_frame);
+    }
   }
-  memset((uint8_t *)inlined_frames, 0xFF, Bsize_wsize(num_frames));
-  for (uint32_t i = 0; i < num_frames; i++) {
-    const auto &frame = frames.getFrame(i);
-    value filename = ext_ocaml_string_of_filename(frame.FileName);
-    demangled_name = ocaml_string_of_cpp_string(frame.FunctionName);
-    constexpr mlsize_t inlined_frame_wosize = Wsize_bsize(sizeof(struct inlined_frame));
-    static_assert(inlined_frame_wosize <= Max_young_wosize);
-    auto *inlined_frame =
-        (struct inlined_frame *)caml_alloc_small(inlined_frame_wosize, /*tag=*/0);
-    *inlined_frame = (struct inlined_frame){
-        .line = Val_long(frame.Line),
-        .column = Val_long(frame.Column),
-        .demangled_name = demangled_name,
-        .filename = filename,
-    };
-    caml_modify(&Field(inlined_frames, num_frames - 1 - i), (value)inlined_frame);
-  }
-  inlined_frames = caml_alloc_some(inlined_frames);
-  CAMLreturn(inlined_frames);
+  // The last frame corresponds to the function itself, not any of its inlined children.
+  demangled_name =
+      ocaml_string_of_cpp_string(frames.getFrame(num_inlined_frames).FunctionName);
+  response = caml_alloc_small(2, /*tag=*/0);
+  auto *response_ptr = (struct response *)response;
+  *response_ptr = (struct response){.demangled_name = demangled_name,
+                                    .inlined_frames = inlined_frames};
+  CAMLreturn(response);
 }
 
 CAMLprim value magic_trace_llvm_symbolize_address_bytecode(value v_executable_file,

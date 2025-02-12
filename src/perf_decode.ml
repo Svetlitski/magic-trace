@@ -110,10 +110,16 @@ let parse_event_header line =
 ;;
 
 module Symbolizer : sig
+  module Response : sig
+    type t = private
+    | None
+    | Some of { demangled_name: string; inlined_frames : Event.Inlined_frame.t array }
+  end
+
   val symbolize
     :  executable:Filename.t
     -> addr:Int64.t
-    -> Event.Inlined_frame.t array option
+    -> Response.t
 end = struct
   module Request = struct
     type t =
@@ -123,13 +129,19 @@ end = struct
     [@@deriving compare, sexp_of, hash]
   end
 
+  module Response = struct
+    type t =
+    | None
+    | Some of { demangled_name: string; inlined_frames : Event.Inlined_frame.t array }
+  end
+
   external symbolize
     :  executable:Filename.t
     -> addr:(Int64.t[@unboxed])
-    -> Event.Inlined_frame.t array option
+    -> Response.t
     = "magic_trace_llvm_symbolize_address_bytecode" "magic_trace_llvm_symbolize_address"
 
-  let (symbolization_cache : (Request.t, Event.Inlined_frame.t array option) Hashtbl.t) =
+  let (symbolization_cache : (Request.t, Response.t) Hashtbl.t) =
     Hashtbl.create (module Request)
   ;;
 
@@ -147,14 +159,7 @@ let resolve_inlined_frames ~elf ~addr ~symbol
   let executable = Elf.executable_file elf in
   match Symbolizer.symbolize ~executable ~addr with
   | None -> None
-  | Some [||] -> assert false
-  | Some [| frame |] ->
-    let symbol =
-      Symbol.From_perf { symbol; demangled_name = Some frame.demangled_name }
-    in
-    Some (symbol, [||])
-  | Some inlined_frames ->
-    let demangled_name = (Array.unsafe_get inlined_frames 0).demangled_name in
+  | Some {demangled_name; inlined_frames} ->
     let symbol = Symbol.From_perf { symbol; demangled_name = Some demangled_name } in
     Some (symbol, inlined_frames)
 ;;
