@@ -352,22 +352,22 @@ let make_emit_trace_events trace thread = exclave_
    smeared time: t1 + k * (t2 - t1) / N. Final events keep their original time. *)
 let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
   let len = Nonempty_vec.length callstacks in
-  let i = ref 0 in
-  while !i < len do
-    let t1 = (Nonempty_vec.get callstacks !i).#time in
+  let mutable i = 0 in
+  while i < len do
+    let t1 = (Nonempty_vec.get callstacks i).#time in
     (* Find the end of the run of events with the same timestamp *)
-    let run_end = ref !i in
+    let mutable run_end = i in
     while
-      !run_end + 1 < len
-      && Timestamp.equal (Nonempty_vec.get callstacks (!run_end + 1)).#time t1
+      run_end + 1 < len
+      && Timestamp.equal (Nonempty_vec.get callstacks (run_end + 1)).#time t1
     do
-      incr run_end
+      run_end <- run_end + 1
     done;
-    let run_length = !run_end - !i + 1 in
-    if !run_end + 1 < len
+    let run_length = run_end - i + 1 in
+    if run_end + 1 < len
     then (
       (* Smear times across this run *)
-      let t2 = (Nonempty_vec.get callstacks (!run_end + 1)).#time in
+      let t2 = (Nonempty_vec.get callstacks (run_end + 1)).#time in
       let duration = Time_ns.Span.( - ) (t2 :> Time_ns.Span.t) (t1 :> Time_ns.Span.t) in
       let duration_ns = Time_ns.Span.to_int_ns duration in
       for k = 0 to run_length - 1 do
@@ -375,11 +375,11 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
         let smeared_time =
           Timestamp.create Time_ns.Span.((t1 :> Time_ns.Span.t) + of_int_ns offset_ns)
         in
-        let cs = Nonempty_vec.get callstacks (!i + k) in
-        Nonempty_vec.set callstacks (!i + k) #{ cs with time = smeared_time }
+        let cs = Nonempty_vec.get callstacks (i + k) in
+        Nonempty_vec.set callstacks (i + k) #{ cs with time = smeared_time }
       done
       (* else: final run - keep original times *));
-    i := !run_end + 1
+    i <- run_end + 1
   done
 ;;
 
