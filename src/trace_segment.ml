@@ -351,32 +351,51 @@ let make_emit_trace_events trace thread = exclave_
    timestamp t1, followed by an event with timestamp t2, the k-th event (0-indexed) gets
    smeared time: t1 + k * (t2 - t1) / N. Final events keep their original time. *)
 let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
+  let[@inline always] consumes_time : Control_flow.t -> bool = function
+    | Call | Jump -> true
+    | _ -> false
+  in
   let len = Nonempty_vec.length callstacks in
   let mutable i = 0 in
   while i < len do
     let t1 = (Nonempty_vec.get callstacks i).#time in
     (* Find the end of the run of events with the same timestamp *)
     let mutable run_end = i in
+    let mutable num_time_consuming_events =
+      consumes_time (Nonempty_vec.get callstacks i).#control_flow |> Bool.to_int
+    in
     while
       run_end + 1 < len
       && Timestamp.equal (Nonempty_vec.get callstacks (run_end + 1)).#time t1
     do
+      num_time_consuming_events
+      <- num_time_consuming_events
+         + (consumes_time (Nonempty_vec.get callstacks (run_end + 1)).#control_flow
+            |> Bool.to_int);
       run_end <- run_end + 1
     done;
+    num_time_consuming_events <- Int.max 1 num_time_consuming_events;
     let run_length = run_end - i + 1 in
     if run_end + 1 < len
     then (
       (* Smear times across this run *)
       let t2 = (Nonempty_vec.get callstacks (run_end + 1)).#time in
-      let duration = Time_ns.Span.( - ) (t2 :> Time_ns.Span.t) (t1 :> Time_ns.Span.t) in
-      let duration_ns = Time_ns.Span.to_int_ns duration in
+      let duration_ns =
+        Time_ns.Span.( - ) (t2 :> Time_ns.Span.t) (t1 :> Time_ns.Span.t)
+        |> Time_ns.Span.to_int_ns
+      in
+      let mutable time_consuming_events_seen = 0 in
       for k = 0 to run_length - 1 do
-        let offset_ns = duration_ns * k / run_length in
+        let cs = Nonempty_vec.get callstacks (i + k) in
+        let offset_ns =
+          duration_ns * time_consuming_events_seen / num_time_consuming_events
+        in
         let smeared_time =
           Timestamp.create Time_ns.Span.((t1 :> Time_ns.Span.t) + of_int_ns offset_ns)
         in
-        let cs = Nonempty_vec.get callstacks (i + k) in
-        Nonempty_vec.set callstacks (i + k) #{ cs with time = smeared_time }
+        Nonempty_vec.set callstacks (i + k) #{ cs with time = smeared_time };
+        time_consuming_events_seen
+        <- time_consuming_events_seen + (consumes_time cs.#control_flow |> Bool.to_int)
       done
       (* else: final run - keep original times *));
     i <- run_end + 1
@@ -393,7 +412,7 @@ let write_trace
   Trace_state.reset ();
   if Nonempty_vec.length t.callstacks > 1
   then (
-    (* smear_times t.callstacks; *)
+    smear_times t.callstacks;
     if enter_initial_callstack
     then (
       (* Modify [t.callstacks] so that the first invocation of [emit_trace_events] calls
