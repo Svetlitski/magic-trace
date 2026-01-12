@@ -115,12 +115,14 @@ end
 
 type t =
   { mutable root : Frame.Sentinel.t
+  ; mutable last_event_time : Timestamp.t
   ; callstacks : Callstack.t Nonempty_vec.t
   }
 
 let create () =
   let root = Frame.Sentinel.create () in
   { root
+  ; last_event_time = Timestamp.zero
   ; callstacks =
       Nonempty_vec.create
         (#{ time = Timestamp.zero
@@ -262,6 +264,8 @@ let[@inline always] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
 
 let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   print event time;
+  assert (Timestamp.(>=) time t.last_event_time);
+  t.last_event_time <- time;
   match event with
   (* TODO Get the untraced "kind" right instead of always showing [Location.untraced] for untraced time. *)
   | Trace { trace_state_change = Some Start; dst; _ } -> handle_return t time ~dst
