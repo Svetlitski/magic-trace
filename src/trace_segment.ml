@@ -8,16 +8,10 @@ module Frame : sig
     ; mutable parent : t Or_null.t
     }
 
-  (* TODO The type of [parent] should really be [t], not [t Or_null.t] because it
-     shouldn't be possible to create a sentinel via this function (see the doc-comment on
-     [Sentinel.t] for more context). *)
-  val create : Location.t -> parent:t Or_null.t -> t
+  val create : Location.t -> parent:t -> t
   val find : t -> Symbol.t -> #(t Or_null.t * distance:int)
-
-  (** Like [iter_until], except that the callback [f] is called in root-to-leaf order. *)
-  val iter_until_rev : t -> Symbol.t -> f:local_ (t -> unit) -> unit
-
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
+  val iter_rev : t -> f:local_ (t -> unit) -> unit
 
   module Sentinel : sig
     type frame := t
@@ -47,7 +41,7 @@ end = struct
     ; mutable parent : t Or_null.t
     }
 
-  let[@inline always] create location ~parent = { location; parent }
+  let[@inline always] create location ~parent = { location; parent = This parent }
 
   let rec find t target distance =
     match t with
@@ -67,12 +61,11 @@ end = struct
       iter_n parent (n - 1) ~f
   ;;
 
-  let rec iter_until_rev t stop_symbol ~f =
+  let rec iter_rev t ~f =
     match t with
     | { parent = Null; _ } -> ()
-    | { location = { symbol; _ }; _ } when Symbol.equal symbol stop_symbol -> ()
     | { parent = This parent; _ } ->
-      iter_until_rev parent stop_symbol ~f;
+      iter_rev parent ~f;
       f t
   ;;
 
@@ -150,60 +143,89 @@ let replace_root t location =
 ;;
 
 let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Location.t) =
-  let control_flow : Control_flow.t = Call in
-  match Frame.find (current_frame t) src.symbol with
-  | #((This _ as src_frame), ~distance:_) ->
-    Nonempty_vec.push_back
-      t.callstacks
-      #{ time; leaf = Frame.create dst ~parent:src_frame; control_flow }
-  | #(Null, ~distance:_) ->
-    (* I would only expect this to happen if this call is the very first event in this
-       trace-segment. *)
-    let src_frame = replace_root t src in
-    Nonempty_vec.push_back
-      t.callstacks
-      #{ time; leaf = Frame.create dst ~parent:(This src_frame); control_flow }
+  (* First reconcile things such that [src] matches [current_frame t] if it doesn't already. *)
+  let () =
+    match Frame.find (current_frame t) src.symbol with
+    | #(This _, ~distance:0) -> (* The happy case, [src] matches [current_frame t]. *) ()
+    | #(This src_frame, ~distance) ->
+      (* [src] exists, but is higher up the callstack. *)
+      Nonempty_vec.push_back
+        t.callstacks
+        #{ time; leaf = src_frame; control_flow = Return { distance } }
+    | #(Null, ~distance:0) ->
+      (* I would only ever expect this to occur at the very beginning of a trace. *)
+      let src_frame = replace_root t src in
+      Nonempty_vec.push_back t.callstacks #{ time; leaf = src_frame; control_flow = Call }
+    | #(Null, ~distance:_) ->
+      (* We've somehow reached [src] without seeing the control-flow that brought us here.
+       TODO: flesh out this comment explaining why this is the most resillient heuristic action to take. *)
+      let src_frame = Frame.create src ~parent:(current_frame t) in
+      Nonempty_vec.push_back t.callstacks #{ time; leaf = src_frame; control_flow = Call }
+  in
+  (* Then emit the new frame for [dst]. *)
+  Nonempty_vec.push_back
+    t.callstacks
+    #{ time; leaf = Frame.create dst ~parent:(current_frame t); control_flow = Call }
 ;;
 
-let handle_return (t : t) (time : Timestamp.t) ~src:_ ~(dst : Location.t) =
-  match Frame.find (current_frame t) dst.symbol with
-  | #(This { parent; _ }, ~distance) ->
-    let distance =
-      (* This is neccessary to handle non-tail recursion. *)
-      Int.max 1 distance
-    in
+let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
+  match (current_frame t).parent with
+  | Null ->
+    (* We are returning into something we did not see the call for. This can happen if
+       there's a series of calls like [fn1 -> fn2 -> fn3] and we started tracing during the
+       execution of [fn2], then we see a return into [fn1]. *)
     Nonempty_vec.push_back
       t.callstacks
-      #{ time; leaf = Frame.create dst ~parent; control_flow = Return { distance } }
-  | #(Null, ~distance) ->
-    (* We have returned into something we never saw the call for. This can happen if there
-       is a sequence of calls like [fn1 -> fn2 -> fn3] and we started tracing during the
-       execution of [fn2]. *)
-    let dst_frame = replace_root t dst in
+      #{ time; leaf = replace_root t dst; control_flow = Return { distance = 0 } }
+  | This parent_frame ->
+    (* We start our search for [dst] from the parent of the current frame because
+       otherwise you'd incorrectly handle non-tail recursion. We add 1 to distance in the
+       [control_flow] to account for the one extra frame implicitly traversed by doing
+       this. TODO: flesh out this comment to further clarify. *)
+    (match Frame.find parent_frame dst.symbol with
+     | #(This dst_frame, ~distance) ->
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time; leaf = dst_frame; control_flow = Return { distance = distance + 1 } }
+     | #(Null, ~distance) ->
+       (* Like the [Null] case above, we are returning into something we never saw the call for. *)
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time
+          ; leaf = replace_root t dst
+          ; control_flow = Return { distance = distance + 1 }
+          })
+;;
+
+let handle_jump (t : t) (time : Timestamp.t) ~(dst : Location.t) =
+  let current_frame = current_frame t in
+  match Frame.find current_frame dst.symbol with
+  | #(This _, ~distance:0) ->
+    (* [dst] matches [current_frame t]. This is either a branch within a function, or
+       tail-recursion. For now we don't need to do anything in this case. That will change
+       once we support inlined frames. *)
+    ()
+  | #(This dst_frame, ~distance) ->
+    (* [dst] exists, but is higher up the callstack. This is likely an exception, or some other exotic control-flow. *)
     Nonempty_vec.push_back
       t.callstacks
       #{ time; leaf = dst_frame; control_flow = Return { distance } }
-;;
-
-let handle_jump (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Location.t) =
-  let control_flow : Control_flow.t = Jump in
-  let current_frame = current_frame t in
-  match Frame.find current_frame src.symbol with
-  | #(This src_frame, ~distance:_) ->
-    (* This is either a branch within a function or a (possibly recursive) tail-call *)
+  | #(Null, ~distance:0) ->
+    (* This is probably a non-recursive tail-call. *)
     Nonempty_vec.push_back
       t.callstacks
-      #{ time; leaf = Frame.create dst ~parent:src_frame.parent; control_flow }
-  | #(Null, ~distance:_) when not (Symbol.equal src.symbol dst.symbol) ->
-    let dst_frame =
-      match Frame.find current_frame dst.symbol with
-      | #(This { parent; _ }, ~distance:_) -> Frame.create dst ~parent
-      | #(Null, ~distance:_) -> replace_root t dst
-    in
-    Nonempty_vec.push_back t.callstacks #{ time; leaf = dst_frame; control_flow }
+      #{ time; leaf = replace_root t dst; control_flow = Jump }
   | #(Null, ~distance:_) ->
-    let dst_frame = replace_root t dst in
-    Nonempty_vec.push_back t.callstacks #{ time; leaf = dst_frame; control_flow }
+    (* This is probably a non-recursive tail-call. *)
+    let parent =
+      (* We know this call will never raise because only sentinels have a [Null] parent,
+         and the [#(Null, ~distance:0)] case above handles the case where [current_frame]
+         is a sentinel. *)
+      Or_null.value_exn current_frame.parent
+    in
+    Nonempty_vec.push_back
+      t.callstacks
+      #{ time; leaf = Frame.create dst ~parent; control_flow = Jump }
 ;;
 
 let[@cold] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
@@ -230,8 +252,7 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   print event time;
   match event with
   (* TODO Get the untraced "kind" right instead of always showing [Location.untraced] for untraced time. *)
-  | Trace { trace_state_change = Some Start; src = _; dst; _ } ->
-    handle_return t time ~src:Location.untraced ~dst
+  | Trace { trace_state_change = Some Start; dst; _ } -> handle_return t time ~dst
   | Trace { trace_state_change = Some End; src; dst = _; _ } ->
     handle_call t time ~src ~dst:Location.untraced
   | Trace
@@ -240,10 +261,8 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
       ; dst
       ; trace_state_change = _
       } -> handle_call t time ~src ~dst
-  | Trace { kind = Some (Return | Sysret | Iret); src; dst; trace_state_change = _ } ->
-    handle_return t time ~src ~dst
-  | Trace { kind = Some (Jump | Async); src; dst; trace_state_change = _ } ->
-    handle_jump t time ~src ~dst
+  | Trace { kind = Some (Return | Sysret | Iret); dst; _ } -> handle_return t time ~dst
+  | Trace { kind = Some (Jump | Async); dst; _ } -> handle_jump t time ~dst
   | _ -> (* TODO *) ()
 ;;
 
@@ -307,9 +326,7 @@ let emit_frame_exit
     ~category:""
 ;;
 
-let make_emit_trace_events trace thread =
-  Trace_state.reset ();
-  exclave_
+let make_emit_trace_events trace thread = exclave_
   Staged.stage (stack_ fun (#(prev, curr) : #(Callstack.t * Callstack.t)) ->
     let[@inline always] emit_frame_enter time location =
       emit_frame_enter trace thread time location
@@ -320,16 +337,9 @@ let make_emit_trace_events trace thread =
     let time = curr.#time in
     match curr.#control_flow with
     | Jump ->
-      (* I'm not sure we even need to be recording a new callstack in the first place when
-         the symbol doesn't change, but I need to double-check. *)
-      if not (Symbol.equal prev.#leaf.location.symbol curr.#leaf.location.symbol)
-      then (
-        emit_frame_exit time prev.#leaf.location;
-        emit_frame_enter time curr.#leaf.location)
-    | Call ->
-      Frame.iter_until_rev curr.#leaf prev.#leaf.location.symbol ~f:(stack_ fun frame ->
-        emit_frame_enter time frame.location)
-      [@nontail]
+      emit_frame_exit time prev.#leaf.location;
+      emit_frame_enter time curr.#leaf.location
+    | Call -> emit_frame_enter time curr.#leaf.location
     | Return { distance } ->
       Frame.iter_n prev.#leaf distance ~f:(stack_ fun frame ->
         emit_frame_exit time frame.location)
@@ -380,9 +390,10 @@ let write_trace
   ~enter_initial_callstack
   ~exit_final_callstack
   =
+  Trace_state.reset ();
   if Nonempty_vec.length t.callstacks > 1
   then (
-    smear_times t.callstacks;
+    (* smear_times t.callstacks; *)
     if enter_initial_callstack
     then (
       (* Modify [t.callstacks] so that the first invocation of [emit_trace_events] calls
@@ -393,22 +404,22 @@ let write_trace
         t.callstacks
         0
         #{ (Nonempty_vec.get t.callstacks 0) with leaf = (t.root :> Frame.t) };
-      Nonempty_vec.set
-        t.callstacks
-        1
-        #{ (Nonempty_vec.get t.callstacks 1) with control_flow = Call });
+      let first_callstack = Nonempty_vec.get t.callstacks 1 in
+      Nonempty_vec.set t.callstacks 1 #{ first_callstack with control_flow = Call };
+      match first_callstack.#leaf.parent with
+      | Null -> ()
+      | This parent_frame ->
+        Frame.iter_rev parent_frame ~f:(stack_ fun frame ->
+          emit_frame_enter trace thread first_callstack.#time frame.location));
     let emit_trace_events = Staged.unstage (make_emit_trace_events trace thread) in
     Nonempty_vec.iter_pairs t.callstacks ~f:emit_trace_events;
     if exit_final_callstack
     then (
       (* Call [emit_frame_exit] for all remaining frames at the end of the segment. *)
       let last_callstack = Nonempty_vec.last t.callstacks in
-      emit_trace_events
-        #( last_callstack
-         , #{ time = last_callstack.#time
-            ; leaf = (t.root :> Frame.t)
-            ; control_flow = Return { distance = Int.max_value }
-            } ) [@nontail]))
+      Frame.iter_n last_callstack.#leaf Int.max_value ~f:(stack_ fun frame ->
+        emit_frame_exit trace thread last_callstack.#time frame.location)
+      [@nontail]))
 ;;
 
 module%test _ = struct
@@ -427,7 +438,7 @@ module%test _ = struct
                  ; instruction_pointer = 0L
                  ; symbol = From_perf leaf_name
                  }
-               ~parent:(This root))
+               ~parent:root)
     in
     #(~root, ~leaf)
   ;;
@@ -646,10 +657,11 @@ module%test _ = struct
     print_callstacks t;
     [%expect
       {|
-        main                main                main                main                main                main
-        fn1                 fn1                 fn1                 fn1                 fn1
-                            fn2                                     fn3
-        - |}]
+      main                main                main                main                main                main                main
+                          fn1                 fn1                 fn1                 fn1                 fn1
+                                              fn2                                     fn3
+      -
+      |}]
   ;;
 
   (*=
@@ -679,31 +691,34 @@ module%test _ = struct
     print_callstacks t;
     [%expect
       {|
-        main                main                main                main                main                main
-        fn1                 fn1                 fn1                 fn1                 fn1
-                            fn2                                     fn3
-        - |}];
+      main                main                main                main                main                main                main
+                          fn1                 fn1                 fn1                 fn1                 fn1
+                                              fn2                                     fn3
+      -
+      |}];
     (* Return for a call we didn't see *)
     return ~src:"main" ~dst:"start";
     print_callstacks t;
     [%expect
       {|
-        start               start               start               start               start               start               start
-        main                main                main                main                main                main
-        fn1                 fn1                 fn1                 fn1                 fn1
-                            fn2                                     fn3
-        - |}];
+      start               start               start               start               start               start               start               start
+      main                main                main                main                main                main                main
+                          fn1                 fn1                 fn1                 fn1                 fn1
+                                              fn2                                     fn3
+      -
+      |}];
     (* Another return for a call we didn't see *)
     return ~src:"start" ~dst:"init";
     print_callstacks t;
     [%expect
       {|
-        init                init                init                init                init                init                init                init
-        start               start               start               start               start               start               start
-        main                main                main                main                main                main
-        fn1                 fn1                 fn1                 fn1                 fn1
-                            fn2                                     fn3
-        - |}]
+      init                init                init                init                init                init                init                init                init
+      start               start               start               start               start               start               start               start
+      main                main                main                main                main                main                main
+                          fn1                 fn1                 fn1                 fn1                 fn1
+                                              fn2                                     fn3
+      -
+      |}]
   ;;
 
   (*=
@@ -728,10 +743,11 @@ module%test _ = struct
     print_callstacks t;
     [%expect
       {|
-      main                main                main                main                main
-      fn1                 fn1                 fn1                 fn1
-                          fn2                                     fn3
-      - |}]
+      main                main                main                main                main                main
+                          fn1                 fn1                 fn1                 fn1
+                                              fn2                                     fn3
+      -
+      |}]
   ;;
 
   (*=
@@ -749,9 +765,10 @@ module%test _ = struct
     print_callstacks t;
     [%expect
       {|
-        main                main                main
-        fn1                 fn1
-        - |}]
+      main                main                main
+                          fn1
+      -
+      |}]
   ;;
 
   (*=
@@ -770,8 +787,9 @@ module%test _ = struct
     print_callstacks t;
     [%expect
       {|
-        main                main                main
-        fn1                 fn2
-        - |}]
+      main                main                main                main
+                          fn1                 fn2
+      -
+      |}]
   ;;
 end
