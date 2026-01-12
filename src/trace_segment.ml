@@ -260,26 +260,16 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   | Trace { trace_state_change = Some End; src; dst = _; _ } ->
     handle_call t time ~src ~dst:Location.untraced
   | Trace
-      { kind = Some (Call | Syscall | Hardware_interrupt)
+      { kind = Some (Call | Syscall | Hardware_interrupt | Interrupt)
       ; src
       ; dst
       ; trace_state_change = _
       } -> handle_call t time ~src ~dst
   | Trace { kind = Some (Return | Sysret | Iret); dst; _ } -> handle_return t time ~dst
   | Trace { kind = Some (Jump | Async); dst; _ } -> handle_jump t time ~dst
-  | _ -> (* TODO *) ()
-;;
-
-let start_time t =
-  if Nonempty_vec.length t.callstacks = 1
-  then Null
-  else This (Nonempty_vec.get t.callstacks 1).#time
-;;
-
-let end_time t =
-  if Nonempty_vec.length t.callstacks = 1
-  then Null
-  else This (Nonempty_vec.last t.callstacks).#time
+  (* TODO *)
+  | Trace { kind = Some Tx_abort | None; _ }
+  | Power _ | Stacktrace_sample _ | Event_sample _ -> ()
 ;;
 
 (** Strictly speaking this module is not necessary assuming the rest of the code is

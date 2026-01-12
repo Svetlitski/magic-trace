@@ -16,6 +16,3 @@ val write_trace
   -> exit_final_callstack:bool
        (** Emit a frame-exit for each frame in the *last* callstack of this segment. *)
   -> unit
-
-val start_time : t -> Timestamp.t Or_null.t
-val end_time : t -> Timestamp.t Or_null.t
