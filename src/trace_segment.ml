@@ -142,8 +142,11 @@ let replace_root t location =
   root
 ;;
 
+(* [handle_call] uses [src], unlike the other event handlers. The rationale for this
+   is that in the context of a call, [src] is the parent frame of the call to [dst]
+   and thus *it continues to exist*. We want our callstacks to reflect that. *)
 let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Location.t) =
-  (* First reconcile things such that [src] matches [current_frame t] if it doesn't
+  (* First, reconcile things such that [src] matches [current_frame t] if it doesn't
      already. *)
   let () =
     match Frame.find (current_frame t) src.symbol with
@@ -159,12 +162,17 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
       Nonempty_vec.push_back t.callstacks #{ time; leaf = src_frame; control_flow = Call }
     | #(Null, ~distance:_) ->
       (* We've somehow reached [src] without seeing the control-flow that brought us here.
-         TODO: flesh out this comment explaining why this is the most resillient heuristic
-         action to take. *)
+
+         To maximize our chances of producing a coherent trace, we create a frame for
+         [src] as a child of the current frame. The idea here is that because we support
+         "long" [Return]s (i.e. [Return]s with [distance > 1]), inserting the additional
+         frame for [src] ( *in addition* to the frame we always create for [dst]) gives us
+         better odds of resynchronizing with the event stream, since now we can easily
+         handle a later return event to [src], [dst], or even both. *)
       let src_frame = Frame.create src ~parent:(current_frame t) in
       Nonempty_vec.push_back t.callstacks #{ time; leaf = src_frame; control_flow = Call }
   in
-  (* Then emit the new frame for [dst]. *)
+  (* Then create the new frame for [dst]. *)
   Nonempty_vec.push_back
     t.callstacks
     #{ time; leaf = Frame.create dst ~parent:(current_frame t); control_flow = Call }
@@ -181,9 +189,9 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
       #{ time; leaf = replace_root t dst; control_flow = Return { distance = 0 } }
   | This parent_frame ->
     (* We start our search for [dst] from the parent of the current frame because
-       otherwise you'd incorrectly handle non-tail recursion. We add 1 to distance in the
-       [control_flow] to account for the one extra frame implicitly traversed by doing
-       this. TODO: flesh out this comment to further clarify. *)
+       otherwise you'd incorrectly handle non-tail recursion, and because returning to the
+       current frame is impossible anyway. We add 1 to [distance] in the [control_flow] to
+       account for the one extra frame implicitly traversed by doing this. *)
     (match Frame.find parent_frame dst.symbol with
      | #(This dst_frame, ~distance) ->
        Nonempty_vec.push_back
