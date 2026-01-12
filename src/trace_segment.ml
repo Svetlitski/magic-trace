@@ -143,7 +143,8 @@ let replace_root t location =
 ;;
 
 let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Location.t) =
-  (* First reconcile things such that [src] matches [current_frame t] if it doesn't already. *)
+  (* First reconcile things such that [src] matches [current_frame t] if it doesn't
+     already. *)
   let () =
     match Frame.find (current_frame t) src.symbol with
     | #(This _, ~distance:0) -> (* The happy case, [src] matches [current_frame t]. *) ()
@@ -158,7 +159,8 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
       Nonempty_vec.push_back t.callstacks #{ time; leaf = src_frame; control_flow = Call }
     | #(Null, ~distance:_) ->
       (* We've somehow reached [src] without seeing the control-flow that brought us here.
-       TODO: flesh out this comment explaining why this is the most resillient heuristic action to take. *)
+         TODO: flesh out this comment explaining why this is the most resillient heuristic
+         action to take. *)
       let src_frame = Frame.create src ~parent:(current_frame t) in
       Nonempty_vec.push_back t.callstacks #{ time; leaf = src_frame; control_flow = Call }
   in
@@ -172,8 +174,8 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
   match (current_frame t).parent with
   | Null ->
     (* We are returning into something we did not see the call for. This can happen if
-       there's a series of calls like [fn1 -> fn2 -> fn3] and we started tracing during the
-       execution of [fn2], then we see a return into [fn1]. *)
+       there's a series of calls like [fn1 -> fn2 -> fn3] and we started tracing during
+       the execution of [fn2], then we see a return into [fn1]. *)
     Nonempty_vec.push_back
       t.callstacks
       #{ time; leaf = replace_root t dst; control_flow = Return { distance = 0 } }
@@ -188,7 +190,8 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
          t.callstacks
          #{ time; leaf = dst_frame; control_flow = Return { distance = distance + 1 } }
      | #(Null, ~distance) ->
-       (* Like the [Null] case above, we are returning into something we never saw the call for. *)
+       (* Like the [Null] case above, we are returning into something we never saw the
+          call for. *)
        Nonempty_vec.push_back
          t.callstacks
          #{ time
@@ -206,7 +209,8 @@ let handle_jump (t : t) (time : Timestamp.t) ~(dst : Location.t) =
        once we support inlined frames. *)
     ()
   | #(This dst_frame, ~distance) ->
-    (* [dst] exists, but is higher up the callstack. This is likely an exception, or some other exotic control-flow. *)
+    (* [dst] exists, but is higher up the callstack. This is likely an exception, or some
+       other exotic control-flow. *)
     Nonempty_vec.push_back
       t.callstacks
       #{ time; leaf = dst_frame; control_flow = Return { distance } }
@@ -297,7 +301,7 @@ let emit_frame_enter
   assert (Timestamp.( >= ) time !Trace_state.last_time);
   Trace_state.last_time := time;
   Vec.push_back Trace_state.stack location.symbol;
-  if debug then Debug.eprintf "Enter %s\n" (Symbol.display_name location.symbol);
+  if debug then eprintf "Enter %s\n" (Symbol.display_name location.symbol);
   Tracing.Trace.write_duration_begin
     trace (* TODO: populate arguments *)
     ~args:[]
@@ -316,7 +320,7 @@ let emit_frame_exit
   assert (Timestamp.( >= ) time !Trace_state.last_time);
   Trace_state.last_time := time;
   [%test_result: Symbol.t] ~expect:(Vec.pop_back_exn Trace_state.stack) location.symbol;
-  if debug then Debug.eprintf "Exit %s\n" (Symbol.display_name location.symbol);
+  if debug then eprintf "Exit %s\n" (Symbol.display_name location.symbol);
   Tracing.Trace.write_duration_end
     trace
     ~args:[]
@@ -479,91 +483,143 @@ module%test _ = struct
       |}]
   ;;
 
-  (* Tests for [smear_times] *)
+  module%test Smear_times = struct
+    let create_callstacks_with_control_flow (items : (int * Control_flow.t) list)
+      : Callstack.t Nonempty_vec.t
+      =
+      let #(~root:_, ~leaf) = parse_frames "a" in
+      match items with
+      | [] -> assert false
+      | (first_time, first_cf) :: rest ->
+        let vec =
+          Nonempty_vec.create
+            (#{ time = Timestamp.create (Time_ns.Span.of_int_ns first_time)
+              ; leaf
+              ; control_flow = first_cf
+              }
+             : Callstack.t)
+        in
+        List.iter rest ~f:(fun (t, cf) ->
+          Nonempty_vec.push_back
+            vec
+            (#{ time = Timestamp.create (Time_ns.Span.of_int_ns t)
+              ; leaf
+              ; control_flow = cf
+              }
+             : Callstack.t));
+        vec
+    ;;
 
-  let create_callstacks_with_times (times : int list) : Callstack.t Nonempty_vec.t =
-    let #(~root:_, ~leaf) = parse_frames "a" in
-    match times with
-    | [] -> failwith "times must be non-empty"
-    | first :: rest ->
-      let vec =
-        Nonempty_vec.create
-          (#{ time = Timestamp.create (Time_ns.Span.of_int_ns first)
-            ; leaf
-            ; control_flow = Call
-            }
-           : Callstack.t)
+    let create_callstacks (times : int list) : Callstack.t Nonempty_vec.t =
+      List.map ~f:(fun time -> time, Control_flow.Call) times
+      |> create_callstacks_with_control_flow
+    ;;
+
+    let print_times (callstacks : Callstack.t Nonempty_vec.t) =
+      Nonempty_vec.iter callstacks ~f:(fun (cs : Callstack.t) ->
+        printf "%2d " (Time_ns.Span.to_int_ns (cs.#time :> Time_ns.Span.t)));
+      print_endline ""
+    ;;
+
+    let%expect_test "[smear_times] with all different timestamps (no smearing needed)" =
+      let callstacks = create_callstacks [ 0; 10; 20; 30 ] in
+      print_times callstacks;
+      [%expect {|  0 10 20 30 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {|  0 10 20 30 |}]
+    ;;
+
+    let%expect_test "[smear_times] with consecutive same timestamps" =
+      let callstacks = create_callstacks [ 0; 0; 0; 30 ] in
+      print_times callstacks;
+      [%expect {|  0  0  0 30 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {|  0 10 20 30 |}]
+    ;;
+
+    let%expect_test "[smear_times] with multiple runs of same timestamps" =
+      let callstacks = create_callstacks [ 0; 0; 20; 20; 20; 50 ] in
+      print_times callstacks;
+      [%expect {|  0  0 20 20 20 50 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {|  0 10 20 30 40 50 |}]
+    ;;
+
+    let%expect_test "[smear_times] final run keeps original time" =
+      let callstacks = create_callstacks [ 0; 0; 30; 30; 30 ] in
+      print_times callstacks;
+      [%expect {|  0  0 30 30 30 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {|  0 15 30 30 30 |}]
+    ;;
+
+    let%expect_test "[smear_times] single event" =
+      let callstacks = create_callstacks [ 100 ] in
+      print_times callstacks;
+      [%expect {| 100 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {| 100 |}]
+    ;;
+
+    let%expect_test "[smear_times] all same timestamp (final run)" =
+      let callstacks = create_callstacks [ 50; 50; 50 ] in
+      print_times callstacks;
+      [%expect {| 50 50 50 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {| 50 50 50 |}]
+    ;;
+
+    let%expect_test "[smear_times] only Call and Jump events consume time" =
+      let callstacks =
+        create_callstacks_with_control_flow
+          [ 0, Return { distance = 1 }
+          ; 0, Call
+          ; 0, Return { distance = 1 }
+          ; 0, Jump
+          ; 100, Call
+          ]
       in
-      List.iter rest ~f:(fun t ->
-        Nonempty_vec.push_back
-          vec
-          (#{ time = Timestamp.create (Time_ns.Span.of_int_ns t)
-            ; leaf
-            ; control_flow = Call
-            }
-           : Callstack.t));
-      vec
-  ;;
+      print_times callstacks;
+      [%expect {|  0  0  0  0 100 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {|  0  0 50 50 100 |}]
+    ;;
 
-  let print_times (callstacks : Callstack.t Nonempty_vec.t) =
-    Nonempty_vec.iter callstacks ~f:(fun (cs : Callstack.t) ->
-      printf "%2d " (Time_ns.Span.to_int_ns (cs.#time :> Time_ns.Span.t)));
-    print_endline ""
-  ;;
+    let%expect_test "[smear_times] first event is a Call" =
+      let callstacks =
+        create_callstacks_with_control_flow
+          [ 0, Call; 0, Return { distance = 1 }; 0, Jump; 90, Call ]
+      in
+      print_times callstacks;
+      [%expect {|  0  0  0 90 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {|  0 45 45 90 |}]
+    ;;
 
-  let%expect_test "[smear_times] with all different timestamps (no smearing needed)" =
-    let callstacks = create_callstacks_with_times [ 0; 10; 20; 30 ] in
-    print_times callstacks;
-    [%expect {|  0 10 20 30 |}];
-    smear_times callstacks;
-    print_times callstacks;
-    [%expect {|  0 10 20 30 |}]
-  ;;
-
-  let%expect_test "[smear_times] with consecutive same timestamps" =
-    let callstacks = create_callstacks_with_times [ 0; 0; 0; 30 ] in
-    print_times callstacks;
-    [%expect {|  0  0  0 30 |}];
-    smear_times callstacks;
-    print_times callstacks;
-    [%expect {|  0 10 20 30 |}]
-  ;;
-
-  let%expect_test "[smear_times] with multiple runs of same timestamps" =
-    let callstacks = create_callstacks_with_times [ 0; 0; 20; 20; 20; 50 ] in
-    print_times callstacks;
-    [%expect {|  0  0 20 20 20 50 |}];
-    smear_times callstacks;
-    print_times callstacks;
-    [%expect {|  0 10 20 30 40 50 |}]
-  ;;
-
-  let%expect_test "[smear_times] final run keeps original time" =
-    let callstacks = create_callstacks_with_times [ 0; 0; 30; 30; 30 ] in
-    print_times callstacks;
-    [%expect {|  0  0 30 30 30 |}];
-    smear_times callstacks;
-    print_times callstacks;
-    [%expect {|  0 15 30 30 30 |}]
-  ;;
-
-  let%expect_test "[smear_times] single event" =
-    let callstacks = create_callstacks_with_times [ 100 ] in
-    print_times callstacks;
-    [%expect {| 100 |}];
-    smear_times callstacks;
-    print_times callstacks;
-    [%expect {| 100 |}]
-  ;;
-
-  let%expect_test "[smear_times] all same timestamp (final run)" =
-    let callstacks = create_callstacks_with_times [ 50; 50; 50 ] in
-    print_times callstacks;
-    [%expect {| 50 50 50 |}];
-    smear_times callstacks;
-    print_times callstacks;
-    [%expect {| 50 50 50 |}]
-  ;;
+    let%expect_test "[smear_times] only Returns uses fallback" =
+      let callstacks =
+        create_callstacks_with_control_flow
+          [ 0, Return { distance = 1 }
+          ; 0, Return { distance = 1 }
+          ; 0, Return { distance = 1 }
+          ; 90, Call
+          ]
+      in
+      print_times callstacks;
+      [%expect {|  0  0  0 90 |}];
+      smear_times callstacks;
+      print_times callstacks;
+      [%expect {|  0  0  0 90 |}]
+    ;;
+  end
 
   let setup_test () =
     let t = create () in
