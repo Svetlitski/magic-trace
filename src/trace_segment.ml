@@ -282,6 +282,10 @@ let end_time t =
   else This (Nonempty_vec.last t.callstacks).#time
 ;;
 
+(** Strictly speaking this module is not necessary assuming the rest of the code is
+    written correctly, but not checking these invariants makes it *much* harder to figure
+    out where things go wrong, because you would just end up with a mangled Perfetto trace
+    but the [magic-trace] invocation would complete silently and successfully. *)
 module Trace_state = struct
   let last_time = ref Timestamp.zero
   let stack = Vec.create ()
@@ -351,10 +355,12 @@ let make_emit_trace_events trace thread = exclave_
 ;;
 
 (* Intel PT may produce many events with the same timestamp due to resolution limitations.
-   To produce better visual traces, we "smear" time: for N consecutive events with
-   timestamp t1, followed by an event with timestamp t2, the k-th event (0-indexed) gets
-   smeared time: t1 + k * (t2 - t1) / N. Final events keep their original time. *)
+   To produce better visual traces, we "smear" time, evenly distributing time amongst runs
+   of consecutive events that all have the same timestamp. *)
 let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
+  (* It would be reasonable to also have [Return]s consume time, but making them not consume
+     time substantially reduces the frequency where we need to use zero-duration events.
+     In general the traces are easier to read if returns aren't counted as consuming time. *)
   let[@inline always] consumes_time : Control_flow.t -> bool = function
     | Call | Jump -> true
     | _ -> false
@@ -419,16 +425,17 @@ let write_trace
     smear_times t.callstacks;
     if enter_initial_callstack
     then (
-      (* Modify [t.callstacks] so that the first invocation of [emit_trace_events] calls
-         [emit_frame_enter] for the entire callstack. This is necessary because otherwise
-         we'd be missing parent-frames in the trace that we discovered by returning into
-         them (see the [Null] case in [handle_return]). *)
       Nonempty_vec.set
         t.callstacks
         0
         #{ (Nonempty_vec.get t.callstacks 0) with leaf = (t.root :> Frame.t) };
       let first_callstack = Nonempty_vec.get t.callstacks 1 in
+      (* Modify [t.callstacks] so that the first invocation of [emit_trace_events] calls
+         [emit_frame_enter] for the leaf frame. *)
       Nonempty_vec.set t.callstacks 1 #{ first_callstack with control_flow = Call };
+      (* Emit a frame enter for everything except the leaf in the initial callstack. We
+         need to do this because otherwise we'd be missing parent frames in the trace that
+         we discovered by returning into them (see the [Null] case in [handle_return]). *)
       match first_callstack.#leaf.parent with
       | Null -> ()
       | This parent_frame ->
