@@ -264,7 +264,7 @@ let[@inline always] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
 
 let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   print event time;
-  assert (Timestamp.(>=) time t.last_event_time);
+  assert (Timestamp.( >= ) time t.last_event_time);
   t.last_event_time <- time;
   match event with
   (* TODO Get the untraced "kind" right instead of always showing [Location.untraced] for untraced time. *)

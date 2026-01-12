@@ -122,7 +122,7 @@ module Thread_info = struct
     ; track_group_id : int
     ; extra_event_tracks : ('thread[@sexp.opaque]) Hashtbl.M(Collection_mode.Event.Name).t
     ; name : string
-    ; trace_segment : (Trace_segment.t[@sexp.opaque])
+    ; trace_segments : (Trace_segment.t Nonempty_vec.t[@sexp.opaque])
     }
   [@@deriving sexp_of]
 
@@ -136,7 +136,14 @@ module Thread_info = struct
   ;;
 
   let add_event_to_trace_segment t event_data time =
-    Trace_segment.add_event t.trace_segment event_data (Timestamp.create time)
+    Trace_segment.add_event
+      (Nonempty_vec.last t.trace_segments)
+      event_data
+      (Timestamp.create time)
+  ;;
+
+  let start_new_trace_segment t =
+    Nonempty_vec.push_back t.trace_segments (Trace_segment.create ())
   ;;
 end
 
@@ -563,7 +570,7 @@ let create_thread t event =
   ; track_group_id
   ; extra_event_tracks = Hashtbl.create (module Collection_mode.Event.Name)
   ; name
-  ; trace_segment = Trace_segment.create ()
+  ; trace_segments = Trace_segment.create () |> Nonempty_vec.create
   }
 ;;
 
@@ -893,13 +900,15 @@ let assert_trace_scope t event trace_scopes =
           (event : Event.t)]
 ;;
 
-let thread_write_trace_segment combined_trace thread trace_segment =
-  Trace_segment.write_trace
-    trace_segment
-    combined_trace
-    thread
-    ~enter_initial_callstack:true
-    ~exit_final_callstack:true
+let thread_write_trace_segments combined_trace thread trace_segments =
+  Nonempty_vec.iter trace_segments ~f:(stack_ fun trace_segment ->
+    Trace_segment.write_trace
+      trace_segment
+      combined_trace
+      thread
+      ~enter_initial_callstack:true
+      ~exit_final_callstack:true)
+  [@nontail]
 ;;
 
 (* TODO Doing all of this within this file and hardcoding both the trace-writer implementation
@@ -917,7 +926,7 @@ let write_trace_segments (type thread) (t : thread inner) =
   Hashtbl.iter t.thread_info ~f:(stack_ fun thread_info ->
     let pid = Tracing.Trace.allocate_pid combined_trace ~name:thread_info.name in
     let thread = Tracing.Trace.allocate_thread combined_trace ~name:"main" ~pid in
-    thread_write_trace_segment combined_trace thread thread_info.trace_segment);
+    thread_write_trace_segments combined_trace thread thread_info.trace_segments);
   Tracing.Trace.close combined_trace
 ;;
 
@@ -1085,7 +1094,8 @@ and write_event' (T t) ?events_writer event =
       | None -> false
       | Some ip -> is_kernel_address ip
     in
-    end_of_thread t thread_info ~time ~is_kernel_address
+    end_of_thread t thread_info ~time ~is_kernel_address;
+    Thread_info.start_new_trace_segment thread_info
   | Ok event_value ->
     if should_write
     then
