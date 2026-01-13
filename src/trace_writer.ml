@@ -921,7 +921,7 @@ let write_trace_segments (type thread) (t : thread inner) =
     let module T = (val t.trace) in
     Tracing.Trace.create_for_file
       ~base_time:(Some T.base_time)
-      ~filename:"combined_trace.fxt.gz"
+      ~filename:"combined_trace.fxt"
   in
   Hashtbl.iter t.thread_info ~f:(stack_ fun thread_info ->
     let pid = Tracing.Trace.allocate_pid combined_trace ~name:thread_info.name in
