@@ -3,13 +3,21 @@ module Location = Event.Location
 module Nonempty_vec = Nonempty_vec.Valuex3
 
 module Frame : sig
+  (* These fields are actually **immutable** except for [Sentinel.t] instances. *)
   type t = private
     { mutable location : Event.Location.t
     ; mutable parent : t Or_null.t
     }
 
   val create : Location.t -> parent:t -> t
+
+  (** Find the first frame whose [location.symbol] matches the provided argument.
+
+      Returns the matching frame (if found), and that frame's distance from the initial
+      frame (e.g. a call to [find my_frame my_symbol] with a return value of
+      [#(This _, ~distance:0)] indicates that [my_frame.location.symbol] is [my_symbol]). *)
   val find : t -> Symbol.t -> #(t Or_null.t * distance:int)
+
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
   val iter_rev : t -> f:local_ (t -> unit) -> unit
 
@@ -103,6 +111,9 @@ module Control_flow = struct
     | Jump
     | Call
     | Return of { distance : int }
+    (** [distance] indicates how many frames this return pops off of the callstack.
+        [distance = 1] is the usual case of returning from the current frame to its
+        parent. *)
 end
 
 module Callstack = struct
@@ -116,6 +127,8 @@ end
 type t =
   { mutable root : Frame.Sentinel.t
   ; mutable last_event_time : Timestamp.t
+  (** Strictly speaking maintaining [last_event_time] is not necessary, but we do so in
+      order to make bugs obvious. *)
   ; callstacks : Callstack.t Nonempty_vec.t
   }
 
