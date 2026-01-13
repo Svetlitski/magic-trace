@@ -298,9 +298,46 @@ module Trace_state = struct
   ;;
 end
 
+let location_args debug_info (location : Location.t) =
+  let display_name = Symbol.display_name location.symbol in
+  let base_address =
+    Int64.(location.instruction_pointer - of_int location.symbol_offset)
+  in
+  let open Tracing.Trace.Arg in
+  (* Using [Interned] may cause some issues with the 32k interned string limit, on
+     sufficiently large programs if the trace goes through a lot of different code,
+     but that'll also be a problem with the span names. This will just make it
+     happen around twice as fast. It does make the traces noticeably smaller.
+
+     The real solution is to get around to improving the interning table management
+     in the trace writer library.
+
+     ---
+
+     [base_address] might be lie in the kernel, in which case [to_int] will fail (but
+     that's alright, because we wouldn't have a symbol for it in the executable's
+     [debug_info] anyway). *)
+  let address = "address", Pointer location.instruction_pointer in
+  match location.symbol with
+  | From_perf_map { start_addr = _; size = _; function_ = _ } ->
+    address :: [ "symbol", Interned display_name ]
+  | _ ->
+    (match Option.bind (Int64.to_int base_address) ~f:(Hashtbl.find debug_info) with
+     | None -> address :: [ "symbol", Interned display_name ]
+     | Some (info : Elf.Location.t) ->
+       (address
+        :: [ "line", Int info.line; "col", Int info.col; "symbol", Interned display_name ]
+       )
+       @
+         (match info.filename with
+         | Some x -> [ "file", Interned x ]
+         | None -> []))
+;;
+
 let emit_frame_enter
   (trace : Tracing.Trace.t)
   thread
+  debug_info
   (time : Timestamp.t)
   (location : Location.t)
   =
@@ -309,8 +346,8 @@ let emit_frame_enter
   Vec.push_back Trace_state.stack location.symbol;
   if debug then eprintf "Enter %s\n" (Symbol.display_name location.symbol);
   Tracing.Trace.write_duration_begin
-    trace (* TODO: populate arguments *)
-    ~args:[]
+    trace
+    ~args:(location_args debug_info location)
     ~thread
     ~name:(Symbol.display_name location.symbol)
     ~time:(time :> Time_ns.Span.t)
@@ -336,10 +373,10 @@ let emit_frame_exit
     ~category:""
 ;;
 
-let make_emit_trace_events trace thread = exclave_
+let make_emit_trace_events trace thread debug_info = exclave_
   Staged.stage (stack_ fun (#(prev, curr) : #(Callstack.t * Callstack.t)) ->
     let[@inline always] emit_frame_enter time location =
-      emit_frame_enter trace thread time location
+      emit_frame_enter trace thread debug_info time location
     in
     let[@inline always] emit_frame_exit time location =
       emit_frame_exit trace thread time location
@@ -418,6 +455,7 @@ let write_trace
   (t : t)
   (trace : Tracing.Trace.t)
   thread
+  debug_info
   ~enter_initial_callstack
   ~exit_final_callstack
   =
@@ -442,8 +480,10 @@ let write_trace
       | Null -> ()
       | This parent_frame ->
         Frame.iter_rev parent_frame ~f:(stack_ fun frame ->
-          emit_frame_enter trace thread first_callstack.#time frame.location));
-    let emit_trace_events = Staged.unstage (make_emit_trace_events trace thread) in
+          emit_frame_enter trace thread debug_info first_callstack.#time frame.location));
+    let emit_trace_events =
+      Staged.unstage (make_emit_trace_events trace thread debug_info)
+    in
     Nonempty_vec.iter_pairs t.callstacks ~f:emit_trace_events;
     if exit_final_callstack
     then (

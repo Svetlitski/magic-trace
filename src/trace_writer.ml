@@ -900,12 +900,13 @@ let assert_trace_scope t event trace_scopes =
           (event : Event.t)]
 ;;
 
-let thread_write_trace_segments combined_trace thread trace_segments =
+let thread_write_trace_segments combined_trace thread debug_info trace_segments =
   Nonempty_vec.iter trace_segments ~f:(stack_ fun trace_segment ->
     Trace_segment.write_trace
       trace_segment
       combined_trace
       thread
+      debug_info
       ~enter_initial_callstack:true
       ~exit_final_callstack:true)
   [@nontail]
@@ -926,7 +927,7 @@ let write_trace_segments (type thread) (t : thread inner) =
   Hashtbl.iter t.thread_info ~f:(stack_ fun thread_info ->
     let pid = Tracing.Trace.allocate_pid combined_trace ~name:thread_info.name in
     let thread = Tracing.Trace.allocate_thread combined_trace ~name:"main" ~pid in
-    thread_write_trace_segments combined_trace thread thread_info.trace_segments);
+    thread_write_trace_segments combined_trace thread t.debug_info thread_info.trace_segments);
   Tracing.Trace.close combined_trace
 ;;
 

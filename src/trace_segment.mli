@@ -11,6 +11,7 @@ val write_trace
   :  t
   -> Tracing.Trace.t
   -> Tracing.Trace.Thread.t
+  -> Elf.Addr_table.t
   -> enter_initial_callstack:bool
        (** Emit a frame-enter for each frame in the *first* callstack of this segment. *)
   -> exit_final_callstack:bool
