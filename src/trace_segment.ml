@@ -297,114 +297,102 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   | Power _ | Stacktrace_sample _ | Event_sample _ -> ()
 ;;
 
-(** Strictly speaking this module is not necessary assuming the rest of the code is
-    written correctly, but not checking these invariants makes it *much* harder to figure
-    out where things go wrong, because you would just end up with a mangled Perfetto trace
-    but the [magic-trace] invocation would complete silently and successfully. *)
-module Trace_state = struct
-  let last_time = ref Timestamp.zero
-  let stack = Vec.create ()
+module Writer : sig
+  type t
 
-  let reset () =
-    last_time := Timestamp.zero;
-    Vec.clear stack
+  val create : Tracing.Trace.t -> Tracing.Trace.Thread.t -> Elf.Addr_table.t -> t @ local
+  val emit_frame_enter : t @ local -> Timestamp.t -> Location.t -> unit
+  val emit_frame_exit : t @ local -> Timestamp.t -> Location.t -> unit
+end = struct
+  type t =
+    { mutable last_time : Timestamp.t @@ global
+    ; active_frames : Symbol.t Vec.t @@ global
+    (** Strictly speaking maintaining [last_time] and [active_frames] is not necessary
+        assuming the rest of the code is written correctly, but not checking our
+        invariants makes it *much* harder to figure out where things go wrong, because you
+        would just end up with a mangled Perfetto trace but the [magic-trace] invocation
+        would complete silently and successfully. *)
+    ; trace : Tracing.Trace.t @@ global
+    ; thread : Tracing.Trace.Thread.t @@ global
+    ; debug_info : Elf.Addr_table.t @@ global
+    }
+
+  let create trace thread debug_info = exclave_
+    stack_
+      { last_time = Timestamp.zero
+      ; active_frames = Vec.create ()
+      ; trace
+      ; thread
+      ; debug_info
+      }
+  ;;
+
+  let location_args debug_info (location : Location.t) =
+    let display_name = Symbol.display_name location.symbol in
+    let base_address =
+      Int64.(location.instruction_pointer - of_int location.symbol_offset)
+    in
+    let open Tracing.Trace.Arg in
+    (* Using [Interned] may cause some issues with the 32k interned string limit, on
+       sufficiently large programs if the trace goes through a lot of different code,
+       but that'll also be a problem with the span names. This will just make it
+       happen around twice as fast. It does make the traces noticeably smaller.
+
+       The real solution is to get around to improving the interning table management
+       in the trace writer library.
+
+       ---
+
+       [base_address] might be lie in the kernel, in which case [to_int] will fail (but
+       that's alright, because we wouldn't have a symbol for it in the executable's
+       [debug_info] anyway). *)
+    let address = "address", Pointer location.instruction_pointer in
+    match location.symbol with
+    | From_perf_map { start_addr = _; size = _; function_ = _ } ->
+      address :: [ "symbol", Interned display_name ]
+    | _ ->
+      (match Option.bind (Int64.to_int base_address) ~f:(Hashtbl.find debug_info) with
+       | None -> address :: [ "symbol", Interned display_name ]
+       | Some (info : Elf.Location.t) ->
+         (address
+          :: [ "line", Int info.line
+             ; "col", Int info.col
+             ; "symbol", Interned display_name
+             ])
+         @
+           (match info.filename with
+           | Some x -> [ "file", Interned x ]
+           | None -> []))
+  ;;
+
+  let emit_frame_enter (t : t) (time : Timestamp.t) (location : Location.t) =
+    assert (Timestamp.( >= ) time t.last_time);
+    t.last_time <- time;
+    Vec.push_back t.active_frames location.symbol;
+    if debug then eprintf "Enter %s\n" (Symbol.display_name location.symbol);
+    Tracing.Trace.write_duration_begin
+      t.trace
+      ~args:(location_args t.debug_info location)
+      ~thread:t.thread
+      ~name:(Symbol.display_name location.symbol)
+      ~time:(time :> Time_ns.Span.t)
+      ~category:""
+  ;;
+
+  let emit_frame_exit t (time : Timestamp.t) (location : Location.t) =
+    assert (Timestamp.( >= ) time t.last_time);
+    t.last_time <- time;
+    [%test_result: Symbol.t] ~expect:(Vec.pop_back_exn t.active_frames) location.symbol;
+    if debug then eprintf "Exit %s\n" (Symbol.display_name location.symbol);
+    Tracing.Trace.write_duration_end
+      t.trace
+      ~args:[]
+      ~thread:t.thread
+      ~name:(Symbol.display_name location.symbol)
+      ~time:(time :> Time_ns.Span.t)
+      ~category:""
   ;;
 end
-
-let location_args debug_info (location : Location.t) =
-  let display_name = Symbol.display_name location.symbol in
-  let base_address =
-    Int64.(location.instruction_pointer - of_int location.symbol_offset)
-  in
-  let open Tracing.Trace.Arg in
-  (* Using [Interned] may cause some issues with the 32k interned string limit, on
-     sufficiently large programs if the trace goes through a lot of different code,
-     but that'll also be a problem with the span names. This will just make it
-     happen around twice as fast. It does make the traces noticeably smaller.
-
-     The real solution is to get around to improving the interning table management
-     in the trace writer library.
-
-     ---
-
-     [base_address] might be lie in the kernel, in which case [to_int] will fail (but
-     that's alright, because we wouldn't have a symbol for it in the executable's
-     [debug_info] anyway). *)
-  let address = "address", Pointer location.instruction_pointer in
-  match location.symbol with
-  | From_perf_map { start_addr = _; size = _; function_ = _ } ->
-    address :: [ "symbol", Interned display_name ]
-  | _ ->
-    (match Option.bind (Int64.to_int base_address) ~f:(Hashtbl.find debug_info) with
-     | None -> address :: [ "symbol", Interned display_name ]
-     | Some (info : Elf.Location.t) ->
-       (address
-        :: [ "line", Int info.line; "col", Int info.col; "symbol", Interned display_name ]
-       )
-       @
-         (match info.filename with
-         | Some x -> [ "file", Interned x ]
-         | None -> []))
-;;
-
-let emit_frame_enter
-  (trace : Tracing.Trace.t)
-  thread
-  debug_info
-  (time : Timestamp.t)
-  (location : Location.t)
-  =
-  assert (Timestamp.( >= ) time !Trace_state.last_time);
-  Trace_state.last_time := time;
-  Vec.push_back Trace_state.stack location.symbol;
-  if debug then eprintf "Enter %s\n" (Symbol.display_name location.symbol);
-  Tracing.Trace.write_duration_begin
-    trace
-    ~args:(location_args debug_info location)
-    ~thread
-    ~name:(Symbol.display_name location.symbol)
-    ~time:(time :> Time_ns.Span.t)
-    ~category:""
-;;
-
-let emit_frame_exit
-  (trace : Tracing.Trace.t)
-  thread
-  (time : Timestamp.t)
-  (location : Location.t)
-  =
-  assert (Timestamp.( >= ) time !Trace_state.last_time);
-  Trace_state.last_time := time;
-  [%test_result: Symbol.t] ~expect:(Vec.pop_back_exn Trace_state.stack) location.symbol;
-  if debug then eprintf "Exit %s\n" (Symbol.display_name location.symbol);
-  Tracing.Trace.write_duration_end
-    trace
-    ~args:[]
-    ~thread
-    ~name:(Symbol.display_name location.symbol)
-    ~time:(time :> Time_ns.Span.t)
-    ~category:""
-;;
-
-let make_emit_trace_events trace thread debug_info = exclave_
-  Staged.stage (stack_ fun (#(prev, curr) : #(Callstack.t * Callstack.t)) ->
-    let[@inline always] emit_frame_enter time location =
-      emit_frame_enter trace thread debug_info time location
-    in
-    let[@inline always] emit_frame_exit time location =
-      emit_frame_exit trace thread time location
-    in
-    let time = curr.#time in
-    match curr.#control_flow with
-    | Jump ->
-      emit_frame_exit time prev.#leaf.location;
-      emit_frame_enter time curr.#leaf.location
-    | Call -> emit_frame_enter time curr.#leaf.location
-    | Return { distance } ->
-      Frame.iter_n prev.#leaf distance ~f:(stack_ fun frame ->
-        emit_frame_exit time frame.location)
-      [@nontail])
-;;
 
 (* Intel PT may produce many events with the same timestamp due to resolution limitations.
    To produce better visual traces, we "smear" time, evenly distributing time amongst runs
@@ -455,6 +443,9 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
         let smeared_time =
           Timestamp.create Time_ns.Span.((t1 :> Time_ns.Span.t) + of_int_ns offset_ns)
         in
+        (* Rewriting the entire [Callstack.t] instead of modifying just the [time] field
+           in-place is sad, but I'm not sure the microoptimization is worth the hassle
+           it'd take to achieve it. *)
         Nonempty_vec.set callstacks (i + k) #{ cs with time = smeared_time };
         time_consuming_events_seen
         <- time_consuming_events_seen + (consumes_time cs.#control_flow |> Bool.to_int)
@@ -472,7 +463,7 @@ let write_trace
   ~enter_initial_callstack
   ~exit_final_callstack
   =
-  Trace_state.reset ();
+  let writer = Writer.create trace thread debug_info in
   if Nonempty_vec.length t.callstacks > 1
   then (
     smear_times t.callstacks;
@@ -483,8 +474,8 @@ let write_trace
         0
         #{ (Nonempty_vec.get t.callstacks 0) with leaf = (t.root :> Frame.t) };
       let first_callstack = Nonempty_vec.get t.callstacks 1 in
-      (* Modify [t.callstacks] so that the first invocation of [emit_trace_events] calls
-         [emit_frame_enter] for the leaf frame. *)
+      (* Modify [t.callstacks] so that the first pair processed in
+         [Nonempty_vec.iter_pairs] below calls [emit_frame_enter] for the leaf frame. *)
       Nonempty_vec.set t.callstacks 1 #{ first_callstack with control_flow = Call };
       (* Emit a frame enter for everything except the leaf in the initial callstack. We
          need to do this because otherwise we'd be missing parent frames in the trace that
@@ -493,17 +484,26 @@ let write_trace
       | Null -> ()
       | This parent_frame ->
         Frame.iter_rev parent_frame ~f:(stack_ fun frame ->
-          emit_frame_enter trace thread debug_info first_callstack.#time frame.location));
-    let emit_trace_events =
-      Staged.unstage (make_emit_trace_events trace thread debug_info)
-    in
-    Nonempty_vec.iter_pairs t.callstacks ~f:emit_trace_events;
+          Writer.emit_frame_enter writer first_callstack.#time frame.location));
+    Nonempty_vec.iter_pairs
+      t.callstacks
+      ~f:(stack_ fun (#(prev, curr) : #(Callstack.t * Callstack.t)) ->
+        let time = curr.#time in
+        match curr.#control_flow with
+        | Jump ->
+          Writer.emit_frame_exit writer time prev.#leaf.location;
+          Writer.emit_frame_enter writer time curr.#leaf.location
+        | Call -> Writer.emit_frame_enter writer time curr.#leaf.location
+        | Return { distance } ->
+          Frame.iter_n prev.#leaf distance ~f:(stack_ fun frame ->
+            Writer.emit_frame_exit writer time frame.location)
+          [@nontail]);
     if exit_final_callstack
     then (
       (* Call [emit_frame_exit] for all remaining frames at the end of the segment. *)
       let last_callstack = Nonempty_vec.last t.callstacks in
       Frame.iter_n last_callstack.#leaf Int.max_value ~f:(stack_ fun frame ->
-        emit_frame_exit trace thread last_callstack.#time frame.location)
+        Writer.emit_frame_exit writer last_callstack.#time frame.location)
       [@nontail]))
 ;;
 
