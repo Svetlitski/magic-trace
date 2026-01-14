@@ -927,7 +927,11 @@ let write_trace_segments (type thread) (t : thread inner) =
   Hashtbl.iter t.thread_info ~f:(stack_ fun thread_info ->
     let pid = Tracing.Trace.allocate_pid combined_trace ~name:thread_info.name in
     let thread = Tracing.Trace.allocate_thread combined_trace ~name:"main" ~pid in
-    thread_write_trace_segments combined_trace thread t.debug_info thread_info.trace_segments);
+    thread_write_trace_segments
+      combined_trace
+      thread
+      t.debug_info
+      thread_info.trace_segments);
   Tracing.Trace.close combined_trace
 ;;
 
