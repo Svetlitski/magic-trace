@@ -469,22 +469,20 @@ let write_trace
     smear_times t.callstacks;
     if enter_initial_callstack
     then (
-      Nonempty_vec.set
-        t.callstacks
-        0
-        #{ (Nonempty_vec.get t.callstacks 0) with leaf = (t.root :> Frame.t) };
       let first_callstack = Nonempty_vec.get t.callstacks 1 in
+      let () =
+        match first_callstack.#leaf.parent with
+        | Null -> ()
+        | This parent_frame ->
+          (* Emit a frame enter for everything except the leaf in the initial callstack. We
+             need to do this because otherwise we'd be missing parent frames in the trace that
+             we discovered by returning into them (see the [Null] case in [handle_return]). *)
+          Frame.iter_rev parent_frame ~f:(stack_ fun frame ->
+            Writer.emit_frame_enter writer first_callstack.#time frame.location)
+      in
       (* Modify [t.callstacks] so that the first pair processed in
          [Nonempty_vec.iter_pairs] below calls [emit_frame_enter] for the leaf frame. *)
-      Nonempty_vec.set t.callstacks 1 #{ first_callstack with control_flow = Call };
-      (* Emit a frame enter for everything except the leaf in the initial callstack. We
-         need to do this because otherwise we'd be missing parent frames in the trace that
-         we discovered by returning into them (see the [Null] case in [handle_return]). *)
-      match first_callstack.#leaf.parent with
-      | Null -> ()
-      | This parent_frame ->
-        Frame.iter_rev parent_frame ~f:(stack_ fun frame ->
-          Writer.emit_frame_enter writer first_callstack.#time frame.location));
+      Nonempty_vec.set t.callstacks 1 #{ first_callstack with control_flow = Call });
     Nonempty_vec.iter_pairs
       t.callstacks
       ~f:(stack_ fun (#(prev, curr) : #(Callstack.t * Callstack.t)) ->
