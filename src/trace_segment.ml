@@ -19,7 +19,12 @@ module Frame : sig
   val find : t -> Symbol.t -> #(t Or_null.t * distance:int)
 
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
+  val get : t -> int -> t
   val iter_rev : t -> f:local_ (t -> unit) -> unit
+
+  (** Convert to a [Vec.t], with the root of the callstack at index 0, and the leaf (i.e.
+      the [t] argument provided to this function) at index [length - 1]. *)
+  val to_vec : t -> Symbol.t Vec.t
 
   module Sentinel : sig
     type frame := t
@@ -69,12 +74,25 @@ end = struct
       iter_n parent (n - 1) ~f
   ;;
 
+  let rec get t n =
+    match t, n with
+    | { parent = Null; _ }, _ -> assert false
+    | t, 0 -> t
+    | { parent = This parent; _ }, n -> get parent (n - 1)
+  ;;
+
   let rec iter_rev t ~f =
     match t with
     | { parent = Null; _ } -> ()
     | { parent = This parent; _ } ->
       iter_rev parent ~f;
       f t
+  ;;
+
+  let to_vec t =
+    let vec = Vec.create () in
+    iter_rev t ~f:(stack_ fun { location; _ } -> Vec.push_back vec location.symbol);
+    vec
   ;;
 
   module Sentinel = struct
@@ -505,6 +523,135 @@ let write_trace
       [@nontail]))
 ;;
 
+module Span = struct
+  type t =
+    { index : int
+    ; length : int
+    }
+  [@@deriving sexp_of, compare]
+end
+
+let find_max_overlap ~(needle : Symbol.t Vec.t) ~(haystack : Symbol.t Vec.t)
+  : Span.t Or_null.t
+  =
+  let needle_len = Vec.length needle in
+  let haystack_len = Vec.length haystack in
+  (* Interpret “no such prefix exists” as “no non-empty prefix exists”. *)
+  if needle_len = 0 || haystack_len = 0
+  then Null
+  else (
+    let mutable best_start = 0 in
+    let mutable best_len = 0 in
+    for i = 0 to haystack_len - 1 do
+      (* Any non-empty prefix match must start with needle.(0). *)
+      if Symbol.equal (Vec.get haystack i) (Vec.get needle 0)
+      then (
+        let max_possible = Int.min needle_len (haystack_len - i) in
+        let j = ref 1 in
+        while
+          !j < max_possible
+          && Symbol.equal (Vec.get haystack (i + !j)) (Vec.get needle !j)
+        do
+          incr j
+        done;
+        let len = !j in
+        (* Tie-breaker: keep the first (lowest start_index) seen. *)
+        if len > best_len
+        then (
+          best_len <- len;
+          best_start <- i))
+    done;
+    if best_len = 0 then Null else This { index = best_start; length = best_len })
+;;
+
+let perform_stitch
+  ~(parent : t)
+  ~(parent_leaf : Frame.t)
+  ~(parent_length : int)
+  ~(child : t)
+  ~(insertion_point : Span.t @ local)
+  =
+  (*= [0; 1; 2; 3; 4]
+      parent_length = 5
+      insertion_point.index = 1
+      traverse from end: parent_length - index - 1
+   *)
+  let join_point = Frame.get parent_leaf (parent_length - insertion_point.index - 1) in
+  (* assert (Symbol.equal join_point.location.symbol (Frame.root child).location.symbol) ; *)
+  match join_point with
+  | { parent = Null; _ } -> assert false
+  | { parent = This { parent = Null; _ }; _ } ->
+    (* The roots are already the same. You are out of luck here. The only way to reconcile
+       the roots is to painfully iterate through every single entry in [child.callstacks]
+       and update the (non-sentinel) root frame of each to point to [parent.root] instead
+       of [child.root]. You can't use [replace_root] because there's no valid location to
+       fill in for [child.root].
+
+       Or I suppose if you're feeling optimistic, you could take this as an opportunity to
+       call [replace_root] and inject a fake frame that indicates to the user that this is
+       an artificial, best-effort join; but you don't *really* want this.
+
+       Or you could make a *phantom* frame by calling [replace_root] with a special
+       [Location.t] and skip over it when emitting frame enters/exits. This is sort of
+       gross, but I think it may be the best option.
+    *)
+    failwith "Unhandled stitching case"
+  | { parent =
+        This ({ parent = This parent_version_grandparent; _ } as parent_version_parent)
+    ; _
+    } ->
+    let _ =
+      Frame.Sentinel.become_frame
+        child.root
+        parent_version_parent.location
+        ~parent:parent_version_grandparent
+    in
+    child.root <- parent.root
+;;
+
+let stitch ~(before : t) ~(after : t) =
+  let end_of_before_leaf = (Nonempty_vec.last before.callstacks).#leaf in
+  let end_of_before = Frame.to_vec end_of_before_leaf in
+  let start_of_after_leaf = (Nonempty_vec.first after.callstacks).#leaf in
+  let start_of_after = Frame.to_vec start_of_after_leaf in
+  let before_as_child_of_after =
+    find_max_overlap ~needle:end_of_before ~haystack:start_of_after
+  in
+  let after_as_child_of_before =
+    find_max_overlap ~needle:start_of_after ~haystack:end_of_before
+  in
+  let how_to_stitch =
+    match before_as_child_of_after, after_as_child_of_before with
+    | Null, Null -> `independent
+    | This _, Null -> `before_as_child_of_after
+    | Null, This _ -> `after_as_child_of_before
+    | This before_as_child_of_after, This after_as_child_of_before ->
+      if before_as_child_of_after.length > after_as_child_of_before.length
+      then `before_as_child_of_after
+      else if after_as_child_of_before.length > before_as_child_of_after.length
+      then `after_as_child_of_before
+      else if after_as_child_of_before.index <= before_as_child_of_after.index
+      then `after_as_child_of_before
+      else `before_as_child_of_after
+  in
+  match how_to_stitch with
+  | `independent -> (* Do nothing *) ()
+  | `before_as_child_of_after ->
+    perform_stitch
+      ~parent:after
+      ~parent_leaf:start_of_after_leaf
+      ~parent_length:(Vec.length start_of_after)
+      ~child:before
+      ~insertion_point:(Or_null.value_exn before_as_child_of_after)
+  | `after_as_child_of_before ->
+    perform_stitch
+      ~parent:before
+      ~parent_leaf:end_of_before_leaf
+      ~parent_length:(Vec.length end_of_before)
+      ~child:after
+      ~insertion_point:(Or_null.value_exn after_as_child_of_before)
+;;
+
 module%test _ = struct
   (* Takes a string like "a-b-c-d-e" which describes a callstack in root-to-leaf order,
      each letter being a function name. *)
@@ -525,6 +672,92 @@ module%test _ = struct
     in
     #(~root, ~leaf)
   ;;
+
+  module%test Stitch = struct
+    let%expect_test "find_max_overlap" =
+      let find_max_overlap ~needle ~haystack =
+        let needle = Array.map needle ~f:(stack_ fun str -> Symbol.From_perf str) in
+        let haystack = Array.map haystack ~f:(stack_ fun str -> Symbol.From_perf str) in
+        find_max_overlap ~needle:(Vec.of_array needle) ~haystack:(Vec.of_array haystack)
+      in
+      [%test_result: Span.t Or_null.t]
+        ~expect:(This { index = 0; length = 3 })
+        (find_max_overlap
+           ~needle:[| "a"; "b"; "c" |]
+           ~haystack:[| "a"; "b"; "c"; "d"; "e" |]);
+      [%test_result: Span.t Or_null.t]
+        ~expect:(This { index = 2; length = 3 })
+        (find_max_overlap
+           ~needle:[| "f"; "g"; "h" |]
+           ~haystack:[| "a"; "b"; "f"; "g"; "h" |]);
+      [%test_result: Span.t Or_null.t]
+        ~expect:(This { index = 2; length = 1 })
+        (find_max_overlap
+           ~needle:[| "f"; "g"; "h" |]
+           ~haystack:[| "a"; "b"; "f"; "w"; "x" |]);
+      [%test_result: Span.t Or_null.t]
+        ~expect:(This { index = 5; length = 2 })
+        (find_max_overlap
+           ~needle:[| "f"; "g"; "h" |]
+           ~haystack:[| "a"; "b"; "f"; "w"; "x"; "f"; "g" |]);
+      [%test_result: Span.t Or_null.t]
+        ~expect:Null
+        (find_max_overlap
+           ~needle:[| "x"; "y"; "z" |]
+           ~haystack:[| "a"; "b"; "c"; "d"; "e"; "f"; "g" |])
+    ;;
+
+    let setup_test ~before_frames ~after_frames =
+      let before, before_leaf =
+        let #(~root, ~leaf) = parse_frames before_frames in
+        ( { root
+          ; callstacks =
+              Nonempty_vec.create
+                (#{ time = Timestamp.zero; leaf; control_flow = Call } : Callstack.t)
+          ; last_event_time = Timestamp.zero
+          }
+        , leaf )
+      in
+      let after, after_leaf =
+        let #(~root, ~leaf) = parse_frames after_frames in
+        ( { root
+          ; callstacks =
+              Nonempty_vec.create
+                (#{ time = Timestamp.zero; leaf; control_flow = Call } : Callstack.t)
+          ; last_event_time = Timestamp.zero
+          }
+        , leaf )
+      in
+      #(~before, ~after, ~before_leaf, ~after_leaf)
+    ;;
+
+    let print_callstack = Frame.For_testing.print_callstack
+
+    let%expect_test "[stitch]" =
+      let #(~before, ~after, ~before_leaf:_, ~after_leaf) =
+        setup_test ~before_frames:"a-b-c-d-e" ~after_frames:"d-e-f-g"
+      in
+      print_callstack after_leaf;
+      [%expect {|
+        d
+        e
+        f
+        g
+        |}];
+      stitch ~before ~after;
+      print_callstack after_leaf;
+      [%expect
+        {|
+        a
+        b
+        c
+        d
+        e
+        f
+        g
+        |}]
+    ;;
+  end
 
   (* Throughout this test-suite, things are rendered vertically in the same way they'd
      appear in the Perfetto viewer. *)
