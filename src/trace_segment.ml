@@ -733,7 +733,7 @@ module%test _ = struct
 
     let print_callstack = Frame.For_testing.print_callstack
 
-    let%expect_test "[stitch]" =
+    let%expect_test "[after] is a child of [before]" =
       let #(~before, ~after, ~before_leaf:_, ~after_leaf) =
         setup_test ~before_frames:"a-b-c-d-e" ~after_frames:"d-e-f-g"
       in
@@ -756,6 +756,204 @@ module%test _ = struct
         f
         g
         |}]
+    ;;
+
+    let%expect_test "[before] is a child of [after]" =
+      let #(~before, ~after, ~before_leaf, ~after_leaf:_) =
+        setup_test ~before_frames:"d-e-f-g" ~after_frames:"a-b-c-d-e"
+      in
+      print_callstack before_leaf;
+      [%expect {|
+        d
+        e
+        f
+        g
+        |}];
+      stitch ~before ~after;
+      print_callstack before_leaf;
+      [%expect
+        {|
+        a
+        b
+        c
+        d
+        e
+        f
+        g
+        |}]
+    ;;
+
+    let%expect_test "When there are multiple valid insertion points, the one with the \
+                     longest overlap is chosen"
+      =
+      let #(~before, ~after, ~before_leaf:_, ~after_leaf) =
+        setup_test ~before_frames:"a-b-c-a-b-c-d-b-c-b" ~after_frames:"b-c-d-e"
+      in
+      print_callstack after_leaf;
+      [%expect {|
+        b
+        c
+        d
+        e
+        |}];
+      stitch ~before ~after;
+      print_callstack after_leaf;
+      [%expect
+        {|
+        a
+        b
+        c
+        a
+        b
+        c
+        d
+        e
+        |}]
+    ;;
+
+    let%expect_test "Disjoint segments are left untouched" =
+      let #(~before, ~after, ~before_leaf, ~after_leaf) =
+        setup_test ~before_frames:"a-b-c-d" ~after_frames:"w-x-y-z"
+      in
+      let () =
+        print_callstack before_leaf;
+        [%expect {|
+        a
+        b
+        c
+        d
+        |}];
+        print_callstack after_leaf;
+        [%expect {|
+        w
+        x
+        y
+        z
+        |}]
+      in
+      stitch ~before ~after;
+      let () =
+        print_callstack before_leaf;
+        [%expect {|
+        a
+        b
+        c
+        d
+        |}];
+        print_callstack after_leaf;
+        [%expect {|
+        w
+        x
+        y
+        z
+        |}]
+      in
+      ()
+    ;;
+
+    let%expect_test "When both stitchings are possible and have equal lengths, prefer \
+                     the one with the shallower insertion point (i.e. where the stitch \
+                     occurs closer to the root)"
+      =
+      let #(~before, ~after, ~before_leaf, ~after_leaf:_) =
+        setup_test ~before_frames:"a-b-c-x-y-z" ~after_frames:"v-w-x-y-z-a-b-c"
+      in
+      print_callstack before_leaf;
+      [%expect {|
+        a
+        b
+        c
+        x
+        y
+        z
+        |}];
+      stitch ~before ~after;
+      print_callstack before_leaf;
+      [%expect
+        {|
+        v
+        w
+        x
+        y
+        z
+        a
+        b
+        c
+        x
+        y
+        z
+        |}]
+    ;;
+
+    let%expect_test "When both stitchings are possible and have equal lengths, *and* \
+                     have insertion points at the same depth, prefer stitching [after] \
+                     as a child of [before]"
+      =
+      let #(~before, ~after, ~before_leaf:_, ~after_leaf) =
+        setup_test ~before_frames:"a-b-c-x-y-z" ~after_frames:"x-y-z-a-b-c"
+      in
+      print_callstack after_leaf;
+      [%expect {|
+        x
+        y
+        z
+        a
+        b
+        c
+        |}];
+      stitch ~before ~after;
+      print_callstack after_leaf;
+      [%expect
+        {|
+        a
+        b
+        c
+        x
+        y
+        z
+        a
+        b
+        c
+        |}]
+    ;;
+
+    let%expect_test "Perfect overlap is handled correctly" =
+      let #(~before, ~after, ~before_leaf, ~after_leaf) =
+        setup_test ~before_frames:"a-b-c" ~after_frames:"a-b-c"
+      in
+      let () =
+        print_callstack before_leaf;
+        [%expect {|
+          a
+          b
+          c
+          |}];
+        print_callstack after_leaf;
+        [%expect
+          {|
+          a
+          b
+          c
+          |}]
+      in
+      stitch ~before ~after;
+      let () =
+        print_callstack before_leaf;
+        [%expect.unreachable];
+        print_callstack after_leaf;
+        [%expect.unreachable]
+      in
+      ()
+    [@@expect.uncaught_exn {|
+      (* CR expect_test_collector: This test expectation appears to contain a backtrace.
+         This is strongly discouraged as backtraces are fragile.
+         Please change this test to not include a backtrace. *)
+      (Failure "Unhandled stitching case")
+      Raised at Stdlib.failwith in file "stdlib.ml" (inlined), line 39, characters 17-33
+      Called from Magic_trace_lib__Trace_segment.perform_stitch in file "src/trace_segment.ml", line 598, characters 4-39
+      Called from Magic_trace_lib__Trace_segment.(fun).M.(fun).M.(fun) in file "src/trace_segment.ml", line 939, characters 6-27
+      Called from Ppx_expect_runtime__Test_block.Configured.dump_backtrace in file "runtime/test_block.ml", line 358, characters 10-25
+      |}]
     ;;
   end
 
