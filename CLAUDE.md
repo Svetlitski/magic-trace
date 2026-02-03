@@ -36,7 +36,8 @@ The built binary is `magic-trace`. Entry point: `bin/magic_trace_bin.ml` which d
 
 `trace_writer.ml` is arguably **the single most important file in the entire project**,
 implementing the core logic for interpreting a stream of events to produce a timeline
-of callstacks. To develop an understanding of the codebase, you should begin by reading
+of callstacks. You should read `doc/TRACE_WRITER_GUIDE.md` to get started.
+After that, to develop an understanding of the codebase, you should begin by reading
 this file **in its entirety** first, then work your way out to the various modules it
 references (preferably by navigating to them with the OCaml LSP).
 
