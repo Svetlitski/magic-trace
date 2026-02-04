@@ -425,8 +425,9 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
     process_pushtraps_and_poptraps t ~src ~time;
     t.last_known_instruction_pointer <- dst.instruction_pointer;
     handle_jump t time ~dst
-  (* TODO *)
-  | Trace { kind = None; _ } | Power _ | Stacktrace_sample _ | Event_sample _ -> ()
+  | Trace { kind = None; _ } -> ()
+  (* All of the below events are handled in [trace_writer.ml]. *)
+  | Power _ | Stacktrace_sample _ | Event_sample _ -> ()
 ;;
 
 module Writer : sig
@@ -450,9 +451,11 @@ end = struct
         would just end up with a mangled Perfetto trace but the [magic-trace] invocation
         would complete silently and successfully. *)
     ; write_duration_begin :
-        (args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit) @@ global
+        args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit
+      @@ global
     ; write_duration_end :
-        (args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit) @@ global
+        args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit
+      @@ global
     ; debug_info : Elf.Addr_table.t @@ global
     }
 
@@ -512,7 +515,7 @@ end = struct
            | None -> []))
   ;;
 
-  let emit_frame_enter (local_ t : _ t) (time : Timestamp.t) (frame : Frame.t) =
+  let emit_frame_enter (local_ (t : _ t)) (time : Timestamp.t) (frame : Frame.t) =
     (* Skip trap frames - they are synthetic markers, not real function calls *)
     if not frame.is_trap
     then (
