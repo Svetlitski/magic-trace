@@ -151,12 +151,15 @@ type t =
   ; callstacks : Callstack.t Nonempty_vec.t
   ; ocaml_exception_info : Ocaml_exception_info.t Or_null.t
   ; mutable last_known_instruction_pointer : int64
+  ; in_filtered_region : bool
   }
 
-let create ocaml_exception_info () =
-  (match ocaml_exception_info with
-   | None -> Debug.eprint "WARNING: No OCaml exception info found"
-   | _ -> ());
+let create ocaml_exception_info ~in_filtered_region () =
+  if Env_vars.debug
+  then (
+    match ocaml_exception_info with
+    | None -> Debug.eprint "WARNING: No OCaml exception info found"
+    | _ -> ());
   let root = Frame.Sentinel.create () in
   { root
   ; last_event_time = Timestamp.zero
@@ -169,9 +172,21 @@ let create ocaml_exception_info () =
          : Callstack.t)
   ; ocaml_exception_info = Or_null.of_option ocaml_exception_info
   ; last_known_instruction_pointer = Int64.max_value
+  ; in_filtered_region
   }
 ;;
 
+let create_continuing_from existing ~in_filtered_region =
+  let last_callstack = Nonempty_vec.last existing.callstacks in
+  { existing with
+    callstacks =
+      Nonempty_vec.create
+        (#{ last_callstack with control_flow = Return { distance = 0 } } : Callstack.t)
+  ; in_filtered_region
+  }
+;;
+
+let in_filtered_region t = t.in_filtered_region
 let[@inline always] current_frame t = (Nonempty_vec.last t.callstacks).#leaf
 
 let replace_root t location =
@@ -394,7 +409,7 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
     process_pushtraps_and_poptraps t ~src ~time;
     t.last_known_instruction_pointer <- dst.instruction_pointer;
     handle_call t time ~src ~dst
-  | Trace { kind = Some Return ; src; dst; _ } ->
+  | Trace { kind = Some Return; src; dst; _ } ->
     process_pushtraps_and_poptraps t ~src ~time;
     t.last_known_instruction_pointer <- dst.instruction_pointer;
     if is_entertrap t ~dst then handle_entertrap t time else handle_return t time ~dst
@@ -803,7 +818,7 @@ module%test _ = struct
   end
 
   let setup_test () =
-    let t = create None () in
+    let t = create None ~in_filtered_region:true () in
     let ip = ref (-1) in
     let time = ref Time_ns.Span.zero in
     let incr_time () = time := Time_ns.Span.(!time + of_int_ns 1) in

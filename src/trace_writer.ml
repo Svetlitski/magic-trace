@@ -142,13 +142,27 @@ module Thread_info = struct
       (Timestamp.create time)
   ;;
 
-  let start_new_trace_segment t =
-    let ocaml_exception_info =
-      match t.ocaml_exception_state with
-      | Without_exception_info _ -> None
-      | With_exception_info { ocaml_exception_info; _ } -> Some ocaml_exception_info
+  module New_trace_segment_kind = struct
+    type t =
+      | Independent
+      | Continuing_from_current
+  end
+
+  let start_new_trace_segment t ~in_filtered_region ~(kind : New_trace_segment_kind.t) =
+    let new_trace_segment =
+      match kind with
+      | Independent ->
+        let ocaml_exception_info =
+          match t.ocaml_exception_state with
+          | Without_exception_info _ -> None
+          | With_exception_info { ocaml_exception_info; _ } -> Some ocaml_exception_info
+        in
+        Trace_segment.create ocaml_exception_info ~in_filtered_region ()
+      | Continuing_from_current ->
+        let current = Nonempty_vec.last t.trace_segments in
+        Trace_segment.create_continuing_from current ~in_filtered_region
     in
-    Nonempty_vec.push_back t.trace_segments (Trace_segment.create ocaml_exception_info ())
+    Nonempty_vec.push_back t.trace_segments new_trace_segment
   ;;
 end
 
@@ -575,7 +589,12 @@ let create_thread t event =
   ; track_group_id
   ; extra_event_tracks = Hashtbl.create (module Collection_mode.Event.Name)
   ; name
-  ; trace_segments = Trace_segment.create t.ocaml_exception_info () |> Nonempty_vec.create
+  ; trace_segments =
+      Trace_segment.create
+        t.ocaml_exception_info
+        ~in_filtered_region:t.in_filtered_region
+        ()
+      |> Nonempty_vec.create
   }
 ;;
 
@@ -907,13 +926,15 @@ let assert_trace_scope t event trace_scopes =
 
 let thread_write_trace_segments combined_trace thread debug_info trace_segments =
   Nonempty_vec.iter trace_segments ~f:(stack_ fun trace_segment ->
-    Trace_segment.write_trace
-      trace_segment
-      combined_trace
-      thread
-      debug_info
-      ~enter_initial_callstack:true
-      ~exit_final_callstack:true)
+    if Trace_segment.in_filtered_region trace_segment
+    then
+      Trace_segment.write_trace
+        trace_segment
+        combined_trace
+        thread
+        debug_info
+        ~enter_initial_callstack:true
+        ~exit_final_callstack:true)
   [@nontail]
 ;;
 
@@ -991,7 +1012,11 @@ let maybe_start_filtered_region t ~should_write ~time =
   then (
     Hashtbl.iter t.thread_info ~f:(fun thread_info ->
       flush t ~to_time:time thread_info;
-      Deque.clear thread_info.start_events);
+      Deque.clear thread_info.start_events;
+      Thread_info.start_new_trace_segment
+        thread_info
+        ~in_filtered_region:true
+        ~kind:Continuing_from_current);
     t.in_filtered_region <- true;
     Hashtbl.iter t.thread_info ~f:(fun thread_info ->
       rewrite_all_callstacks t ~thread_info ~time))
@@ -1001,7 +1026,12 @@ let maybe_stop_filtered_region t ~should_write =
   if t.in_filtered_region && not should_write
   then (
     end_of_trace (T t);
-    t.in_filtered_region <- false)
+    t.in_filtered_region <- false;
+    Hashtbl.iter t.thread_info ~f:(fun thread_info ->
+      Thread_info.start_new_trace_segment
+        thread_info
+        ~in_filtered_region:false
+        ~kind:Continuing_from_current))
 ;;
 
 let write_event_and_callstack
@@ -1105,7 +1135,10 @@ and write_event' (T t) ?events_writer event =
       | Some ip -> is_kernel_address ip
     in
     end_of_thread t thread_info ~time ~is_kernel_address;
-    Thread_info.start_new_trace_segment thread_info
+    Thread_info.start_new_trace_segment
+      thread_info
+      ~in_filtered_region:t.in_filtered_region
+      ~kind:Independent
   | Ok event_value ->
     if should_write
     then
