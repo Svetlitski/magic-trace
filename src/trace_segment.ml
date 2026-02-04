@@ -19,8 +19,8 @@ module Frame : sig
       [#(This _, ~distance:0)] indicates that [my_frame.location.symbol] is [my_symbol]). *)
   val find : t -> Symbol.t -> #(t Or_null.t * distance:int)
 
-  (** Find the first ancestor frame where [is_trap = true].
-      Returns the trap frame and distance to it, or [Null] if none found. *)
+  (** Find the first ancestor frame where [is_trap = true]. Returns the trap frame and
+      distance to it, or [Null] if none found. *)
   val find_trap : t -> #(t Or_null.t * distance:int)
 
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
@@ -58,7 +58,6 @@ end = struct
   let[@inline always] create ?(is_trap = false) location ~parent =
     { location; parent = This parent; is_trap }
   ;;
-
 
   let rec find t target distance =
     match t with
@@ -102,7 +101,9 @@ end = struct
       { instruction_pointer = 0L; symbol_offset = 0; symbol = Unknown }
     ;;
 
-    let[@inline always] create () = { location = sentinel_location; parent = Null; is_trap = false }
+    let[@inline always] create () =
+      { location = sentinel_location; parent = Null; is_trap = false }
+    ;;
 
     let become_frame t location ~parent =
       t.location <- location;
@@ -148,14 +149,14 @@ type t =
   (** Strictly speaking maintaining [last_event_time] is not necessary, but we do so in
       order to make bugs obvious. *)
   ; callstacks : Callstack.t Nonempty_vec.t
-  ; ocaml_exception_info : Ocaml_exception_info.t option
-  ; mutable last_known_instruction_pointer : int64 option
+  ; ocaml_exception_info : Ocaml_exception_info.t Or_null.t
+  ; mutable last_known_instruction_pointer : int64
   }
 
-let create ?ocaml_exception_info () =
+let create ocaml_exception_info () =
   (match ocaml_exception_info with
-  | None -> Debug.eprint "WARNING: No OCaml exception info found"
-  | _ -> ());
+   | None -> Debug.eprint "WARNING: No OCaml exception info found"
+   | _ -> ());
   let root = Frame.Sentinel.create () in
   { root
   ; last_event_time = Timestamp.zero
@@ -166,8 +167,8 @@ let create ?ocaml_exception_info () =
           ; control_flow = Return { distance = Int.max_value }
           }
          : Callstack.t)
-  ; ocaml_exception_info
-  ; last_known_instruction_pointer = None
+  ; ocaml_exception_info = Or_null.of_option ocaml_exception_info
+  ; last_known_instruction_pointer = Int64.max_value
   }
 ;;
 
@@ -286,44 +287,42 @@ let handle_jump (t : t) (time : Timestamp.t) ~(dst : Location.t) =
       #{ time; leaf = Frame.create dst ~parent; control_flow = Jump }
 ;;
 
-(** Handle a pushtrap (exception handler installation).
-    Creates a trap frame with the same location as the current frame, marked with [is_trap = true]. *)
+(** Handle a pushtrap (exception handler installation). Creates a trap frame with the same
+    location as the current frame, marked with [is_trap = true]. *)
 let handle_pushtrap (t : t) (time : Timestamp.t) =
   let current = current_frame t in
   let trap_frame = Frame.create ~is_trap:true current.location ~parent:current in
   Nonempty_vec.push_back t.callstacks #{ time; leaf = trap_frame; control_flow = Call }
 ;;
 
-(** Handle a poptrap (normal exit from try block without exception).
-    Closes the trap frame if the current frame is a trap frame. *)
+(** Handle a poptrap (normal exit from try block without exception). Closes the trap frame
+    if the current frame is a trap frame. *)
 let handle_poptrap (t : t) (time : Timestamp.t) =
   let current = current_frame t in
   if current.is_trap
-  then (
-    match current.parent with
-    | This parent ->
-      Nonempty_vec.push_back
-        t.callstacks
-        #{ time; leaf = parent; control_flow = Return { distance = 1 } }
-    | Null ->
-      (* Trap frames should always have a parent *)
-      assert false)
+  then
+    Nonempty_vec.push_back
+      t.callstacks
+      #{ time
+       ; (* This will never raise, sentinel frames cannot be trap frames. *)
+         leaf = Or_null.value_exn current.parent
+       ; control_flow = Return { distance = 1 }
+       }
 ;;
 
-(** Handle an entertrap (exception raised, jumping to handler).
-    Searches up the callstack for the nearest trap frame and unwinds to its parent. *)
+(** Handle an entertrap (exception raised, jumping to handler). Searches up the callstack
+    for the nearest trap frame and unwinds to its parent. *)
 let handle_entertrap (t : t) (time : Timestamp.t) =
   match Frame.find_trap (current_frame t) with
   | #(This trap_frame, ~distance) ->
-    (* Unwind to trap frame's parent (distance + 1 closes frames including trap frame) *)
-    (match trap_frame.parent with
-     | This parent ->
-       Nonempty_vec.push_back
-         t.callstacks
-         #{ time; leaf = parent; control_flow = Return { distance = distance + 1 } }
-     | Null ->
-       (* Trap frames should always have a parent *)
-       assert false)
+    (* Unwind to trap frame's parent ([distance + 1] closes frames including trap frame) *)
+    Nonempty_vec.push_back
+      t.callstacks
+      #{ time
+       ; (* This will never raise, sentinel frames cannot be trap frames. *)
+         leaf = Or_null.value_exn trap_frame.parent
+       ; control_flow = Return { distance = distance + 1 }
+       }
   | #(Null, ~distance:_) ->
     (* No trap found - this can happen if we started tracing after the pushtrap.
        Fall back to doing nothing - the jump handling will take care of it. *)
@@ -350,28 +349,29 @@ let[@inline always] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
   if debug then print event time
 ;;
 
-(** Process any pushtraps/poptraps that occurred between the last known instruction pointer
-    and [src]. *)
+(** Process any pushtraps/poptraps that occurred between the last known instruction
+    pointer and [src]. *)
 let process_pushtraps_and_poptraps t ~src ~time =
-  match t.ocaml_exception_info, t.last_known_instruction_pointer with
-  | Some ocaml_exception_info, Some last_ip ->
+  match t.ocaml_exception_info with
+  | Null -> ()
+  | This ocaml_exception_info ->
     Ocaml_exception_info.iter_pushtraps_and_poptraps_in_range
       ocaml_exception_info
-      ~from:last_ip
+      ~from:t.last_known_instruction_pointer
       ~to_:(src : Location.t).instruction_pointer
-      ~f:(fun (_addr, kind) ->
+      ~f:(stack_ fun (_addr, kind) ->
         match kind with
         | Pushtrap -> handle_pushtrap t time
         | Poptrap -> handle_poptrap t time)
-  | _, _ -> ()
+    [@nontail]
 ;;
 
 (** Check if [dst] is an entertrap address. *)
 let is_entertrap t ~(dst : Location.t) =
   match t.ocaml_exception_info with
-  | Some ocaml_exception_info ->
+  | Null -> false
+  | This ocaml_exception_info ->
     Ocaml_exception_info.is_entertrap ocaml_exception_info ~addr:dst.instruction_pointer
-  | None -> false
 ;;
 
 let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
@@ -380,7 +380,9 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   t.last_event_time <- time;
   match event with
   (* TODO Get the untraced "kind" right instead of always showing [Location.untraced] for untraced time. *)
-  | Trace { trace_state_change = Some Start; dst; _ } -> handle_return t time ~dst
+  | Trace { trace_state_change = Some Start; dst; _ } ->
+    t.last_known_instruction_pointer <- dst.instruction_pointer;
+    handle_return t time ~dst
   | Trace { trace_state_change = Some End; src; dst = _; _ } ->
     handle_call t time ~src ~dst:Location.untraced
   | Trace
@@ -390,15 +392,15 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
       ; trace_state_change = _
       } ->
     process_pushtraps_and_poptraps t ~src ~time;
-    t.last_known_instruction_pointer <- Some dst.instruction_pointer;
+    t.last_known_instruction_pointer <- dst.instruction_pointer;
     handle_call t time ~src ~dst
   | Trace { kind = Some (Return | Sysret | Iret); src; dst; _ } ->
     process_pushtraps_and_poptraps t ~src ~time;
-    t.last_known_instruction_pointer <- Some dst.instruction_pointer;
+    t.last_known_instruction_pointer <- dst.instruction_pointer;
     handle_return t time ~dst
   | Trace { kind = Some (Jump | Async); src; dst; _ } ->
     process_pushtraps_and_poptraps t ~src ~time;
-    t.last_known_instruction_pointer <- Some dst.instruction_pointer;
+    t.last_known_instruction_pointer <- dst.instruction_pointer;
     if is_entertrap t ~dst then handle_entertrap t time else handle_jump t time ~dst
   (* TODO *)
   | Trace { kind = Some Tx_abort | None; _ }
@@ -475,9 +477,8 @@ end = struct
 
   let emit_frame_enter (t : t) (time : Timestamp.t) (frame : Frame.t) =
     (* Skip trap frames - they are synthetic markers, not real function calls *)
-    if frame.is_trap
-    then ()
-    else (
+    if not frame.is_trap
+    then (
       let location = frame.location in
       assert (Timestamp.( >= ) time t.last_time);
       t.last_time <- time;
@@ -494,9 +495,8 @@ end = struct
 
   let emit_frame_exit t (time : Timestamp.t) (frame : Frame.t) =
     (* Skip trap frames - they are synthetic markers, not real function calls *)
-    if frame.is_trap
-    then ()
-    else (
+    if not frame.is_trap
+    then (
       let location = frame.location in
       assert (Timestamp.( >= ) time t.last_time);
       t.last_time <- time;
@@ -520,7 +520,7 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
      time substantially reduces the frequency where we need to use zero-duration events.
      In general the traces are easier to read if returns aren't counted as consuming time. *)
   let[@inline always] consumes_time : Callstack.t -> bool = function
-    | #{ leaf = {is_trap = false; _}; control_flow = Call | Jump; _ } -> true
+    | #{ leaf = { is_trap = false; _ }; control_flow = Call | Jump; _ } -> true
     | _ -> false
   in
   let len = Nonempty_vec.length callstacks in
@@ -538,8 +538,7 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
     do
       num_time_consuming_events
       <- num_time_consuming_events
-         + (consumes_time (Nonempty_vec.get callstacks (run_end + 1))
-            |> Bool.to_int);
+         + (consumes_time (Nonempty_vec.get callstacks (run_end + 1)) |> Bool.to_int);
       run_end <- run_end + 1
     done;
     num_time_consuming_events <- Int.max 1 num_time_consuming_events;
@@ -800,7 +799,7 @@ module%test _ = struct
   end
 
   let setup_test () =
-    let t = create () in
+    let t = create None () in
     let ip = ref (-1) in
     let time = ref Time_ns.Span.zero in
     let incr_time () = time := Time_ns.Span.(!time + of_int_ns 1) in

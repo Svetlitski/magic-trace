@@ -148,7 +148,7 @@ module Thread_info = struct
       | Without_exception_info _ -> None
       | With_exception_info { ocaml_exception_info; _ } -> Some ocaml_exception_info
     in
-    Nonempty_vec.push_back t.trace_segments (Trace_segment.create ?ocaml_exception_info ())
+    Nonempty_vec.push_back t.trace_segments (Trace_segment.create ocaml_exception_info ())
   ;;
 end
 
@@ -575,7 +575,7 @@ let create_thread t event =
   ; track_group_id
   ; extra_event_tracks = Hashtbl.create (module Collection_mode.Event.Name)
   ; name
-  ; trace_segments = Trace_segment.create ?ocaml_exception_info:t.ocaml_exception_info () |> Nonempty_vec.create
+  ; trace_segments = Trace_segment.create t.ocaml_exception_info () |> Nonempty_vec.create
   }
 ;;
 
