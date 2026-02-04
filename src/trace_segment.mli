@@ -15,8 +15,8 @@ val add_event : t -> Event.Ok.Data.t -> Timestamp.t -> unit
 
 val write_trace
   :  t
-  -> Tracing.Trace.t
-  -> Tracing.Trace.Thread.t
+  -> (module Trace_writer_intf.S_trace with type thread = 'thread)
+  -> 'thread
   -> Elf.Addr_table.t
   -> enter_initial_callstack:bool
        (** Emit a frame-enter for each frame in the *first* callstack of this segment. *)
