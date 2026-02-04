@@ -400,31 +400,14 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
     handle_return t time ~dst
   | Trace { trace_state_change = Some End; src; dst = _; _ } ->
     handle_call t time ~src ~dst:Location.untraced
-  | Trace
-      { kind = Some (Call | Syscall | Hardware_interrupt | Interrupt)
-      ; src
-      ; dst
-      ; trace_state_change = _
-      } ->
+  | Trace { trace_state_change = None; kind = Some kind; src; dst } ->
     process_pushtraps_and_poptraps t ~src ~time;
     t.last_known_instruction_pointer <- dst.instruction_pointer;
-    handle_call t time ~src ~dst
-  | Trace { kind = Some Return; src; dst; _ } ->
-    process_pushtraps_and_poptraps t ~src ~time;
-    t.last_known_instruction_pointer <- dst.instruction_pointer;
-    if is_entertrap t ~dst then handle_entertrap t time else handle_return t time ~dst
-  | Trace { kind = Some (Sysret | Iret); src; dst; _ } ->
-    process_pushtraps_and_poptraps t ~src ~time;
-    t.last_known_instruction_pointer <- dst.instruction_pointer;
-    handle_return t time ~dst
-  | Trace { kind = Some Jump; src; dst; _ } when is_entertrap t ~dst ->
-    process_pushtraps_and_poptraps t ~src ~time;
-    t.last_known_instruction_pointer <- dst.instruction_pointer;
-    handle_entertrap t time
-  | Trace { kind = Some (Jump | Tx_abort | Async); src; dst; _ } ->
-    process_pushtraps_and_poptraps t ~src ~time;
-    t.last_known_instruction_pointer <- dst.instruction_pointer;
-    handle_jump t time ~dst
+    (match kind with
+     | Call | Syscall | Hardware_interrupt | Interrupt -> handle_call t time ~src ~dst
+     | (Return | Jump) when is_entertrap t ~dst -> handle_entertrap t time
+     | Return | Sysret | Iret -> handle_return t time ~dst
+     | Jump | Tx_abort | Async -> handle_jump t time ~dst)
   | Trace { kind = None; _ } -> ()
   (* All of the below events are handled in [trace_writer.ml]. *)
   | Power _ | Stacktrace_sample _ | Event_sample _ -> ()
