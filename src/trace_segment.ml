@@ -394,7 +394,11 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
     process_pushtraps_and_poptraps t ~src ~time;
     t.last_known_instruction_pointer <- dst.instruction_pointer;
     handle_call t time ~src ~dst
-  | Trace { kind = Some (Return | Sysret | Iret); src; dst; _ } ->
+  | Trace { kind = Some Return ; src; dst; _ } ->
+    process_pushtraps_and_poptraps t ~src ~time;
+    t.last_known_instruction_pointer <- dst.instruction_pointer;
+    if is_entertrap t ~dst then handle_entertrap t time else handle_return t time ~dst
+  | Trace { kind = Some (Sysret | Iret); src; dst; _ } ->
     process_pushtraps_and_poptraps t ~src ~time;
     t.last_known_instruction_pointer <- dst.instruction_pointer;
     handle_return t time ~dst
