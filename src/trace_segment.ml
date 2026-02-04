@@ -417,13 +417,16 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
     process_pushtraps_and_poptraps t ~src ~time;
     t.last_known_instruction_pointer <- dst.instruction_pointer;
     handle_return t time ~dst
-  | Trace { kind = Some (Jump | Async); src; dst; _ } ->
+  | Trace { kind = Some Jump; src; dst; _ } when is_entertrap t ~dst ->
     process_pushtraps_and_poptraps t ~src ~time;
     t.last_known_instruction_pointer <- dst.instruction_pointer;
-    if is_entertrap t ~dst then handle_entertrap t time else handle_jump t time ~dst
+    handle_entertrap t time
+  | Trace { kind = Some (Jump | Tx_abort | Async); src; dst; _ } ->
+    process_pushtraps_and_poptraps t ~src ~time;
+    t.last_known_instruction_pointer <- dst.instruction_pointer;
+    handle_jump t time ~dst
   (* TODO *)
-  | Trace { kind = Some Tx_abort | None; _ }
-  | Power _ | Stacktrace_sample _ | Event_sample _ -> ()
+  | Trace { kind = None; _ } | Power _ | Stacktrace_sample _ | Event_sample _ -> ()
 ;;
 
 module Writer : sig
