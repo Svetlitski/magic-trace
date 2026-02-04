@@ -7,9 +7,10 @@ module Frame : sig
   type t = private
     { mutable location : Event.Location.t
     ; mutable parent : t Or_null.t
+    ; is_trap : bool
     }
 
-  val create : Location.t -> parent:t -> t
+  val create : ?is_trap:bool -> Location.t -> parent:t -> t
 
   (** Find the first frame whose [location.symbol] matches the provided argument.
 
@@ -17,6 +18,10 @@ module Frame : sig
       frame (e.g. a call to [find my_frame my_symbol] with a return value of
       [#(This _, ~distance:0)] indicates that [my_frame.location.symbol] is [my_symbol]). *)
   val find : t -> Symbol.t -> #(t Or_null.t * distance:int)
+
+  (** Find the first ancestor frame where [is_trap = true].
+      Returns the trap frame and distance to it, or [Null] if none found. *)
+  val find_trap : t -> #(t Or_null.t * distance:int)
 
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
   val iter_rev : t -> f:local_ (t -> unit) -> unit
@@ -47,9 +52,13 @@ end = struct
   type t =
     { mutable location : Event.Location.t
     ; mutable parent : t Or_null.t
+    ; is_trap : bool
     }
 
-  let[@inline always] create location ~parent = { location; parent = This parent }
+  let[@inline always] create ?(is_trap = false) location ~parent =
+    { location; parent = This parent; is_trap }
+  ;;
+
 
   let rec find t target distance =
     match t with
@@ -60,6 +69,15 @@ end = struct
   ;;
 
   let find t target = find t target 0
+
+  let rec find_trap t distance =
+    match t with
+    | { parent = Null; _ } -> #(Null, ~distance)
+    | { is_trap = true; _ } -> #(This t, ~distance)
+    | { parent = This parent; _ } -> find_trap parent (distance + 1)
+  ;;
+
+  let find_trap t = find_trap t 0
 
   let rec iter_n t n ~f =
     match t, n with
@@ -84,7 +102,7 @@ end = struct
       { instruction_pointer = 0L; symbol_offset = 0; symbol = Unknown }
     ;;
 
-    let[@inline always] create () = { location = sentinel_location; parent = Null }
+    let[@inline always] create () = { location = sentinel_location; parent = Null; is_trap = false }
 
     let become_frame t location ~parent =
       t.location <- location;
@@ -130,9 +148,14 @@ type t =
   (** Strictly speaking maintaining [last_event_time] is not necessary, but we do so in
       order to make bugs obvious. *)
   ; callstacks : Callstack.t Nonempty_vec.t
+  ; ocaml_exception_info : Ocaml_exception_info.t option
+  ; mutable last_known_instruction_pointer : int64 option
   }
 
-let create () =
+let create ?ocaml_exception_info () =
+  (match ocaml_exception_info with
+  | None -> Debug.eprint "WARNING: No OCaml exception info found"
+  | _ -> ());
   let root = Frame.Sentinel.create () in
   { root
   ; last_event_time = Timestamp.zero
@@ -143,6 +166,8 @@ let create () =
           ; control_flow = Return { distance = Int.max_value }
           }
          : Callstack.t)
+  ; ocaml_exception_info
+  ; last_known_instruction_pointer = None
   }
 ;;
 
@@ -261,6 +286,50 @@ let handle_jump (t : t) (time : Timestamp.t) ~(dst : Location.t) =
       #{ time; leaf = Frame.create dst ~parent; control_flow = Jump }
 ;;
 
+(** Handle a pushtrap (exception handler installation).
+    Creates a trap frame with the same location as the current frame, marked with [is_trap = true]. *)
+let handle_pushtrap (t : t) (time : Timestamp.t) =
+  let current = current_frame t in
+  let trap_frame = Frame.create ~is_trap:true current.location ~parent:current in
+  Nonempty_vec.push_back t.callstacks #{ time; leaf = trap_frame; control_flow = Call }
+;;
+
+(** Handle a poptrap (normal exit from try block without exception).
+    Closes the trap frame if the current frame is a trap frame. *)
+let handle_poptrap (t : t) (time : Timestamp.t) =
+  let current = current_frame t in
+  if current.is_trap
+  then (
+    match current.parent with
+    | This parent ->
+      Nonempty_vec.push_back
+        t.callstacks
+        #{ time; leaf = parent; control_flow = Return { distance = 1 } }
+    | Null ->
+      (* Trap frames should always have a parent *)
+      assert false)
+;;
+
+(** Handle an entertrap (exception raised, jumping to handler).
+    Searches up the callstack for the nearest trap frame and unwinds to its parent. *)
+let handle_entertrap (t : t) (time : Timestamp.t) =
+  match Frame.find_trap (current_frame t) with
+  | #(This trap_frame, ~distance) ->
+    (* Unwind to trap frame's parent (distance + 1 closes frames including trap frame) *)
+    (match trap_frame.parent with
+     | This parent ->
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time; leaf = parent; control_flow = Return { distance = distance + 1 } }
+     | Null ->
+       (* Trap frames should always have a parent *)
+       assert false)
+  | #(Null, ~distance:_) ->
+    (* No trap found - this can happen if we started tracing after the pushtrap.
+       Fall back to doing nothing - the jump handling will take care of it. *)
+    ()
+;;
+
 let[@cold] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
   match event with
   | Trace { kind; src; dst; trace_state_change } ->
@@ -281,6 +350,30 @@ let[@inline always] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
   if debug then print event time
 ;;
 
+(** Process any pushtraps/poptraps that occurred between the last known instruction pointer
+    and [src]. *)
+let process_pushtraps_and_poptraps t ~src ~time =
+  match t.ocaml_exception_info, t.last_known_instruction_pointer with
+  | Some ocaml_exception_info, Some last_ip ->
+    Ocaml_exception_info.iter_pushtraps_and_poptraps_in_range
+      ocaml_exception_info
+      ~from:last_ip
+      ~to_:(src : Location.t).instruction_pointer
+      ~f:(fun (_addr, kind) ->
+        match kind with
+        | Pushtrap -> handle_pushtrap t time
+        | Poptrap -> handle_poptrap t time)
+  | _, _ -> ()
+;;
+
+(** Check if [dst] is an entertrap address. *)
+let is_entertrap t ~(dst : Location.t) =
+  match t.ocaml_exception_info with
+  | Some ocaml_exception_info ->
+    Ocaml_exception_info.is_entertrap ocaml_exception_info ~addr:dst.instruction_pointer
+  | None -> false
+;;
+
 let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   print event time;
   assert (Timestamp.( >= ) time t.last_event_time);
@@ -295,9 +388,18 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
       ; src
       ; dst
       ; trace_state_change = _
-      } -> handle_call t time ~src ~dst
-  | Trace { kind = Some (Return | Sysret | Iret); dst; _ } -> handle_return t time ~dst
-  | Trace { kind = Some (Jump | Async); dst; _ } -> handle_jump t time ~dst
+      } ->
+    process_pushtraps_and_poptraps t ~src ~time;
+    t.last_known_instruction_pointer <- Some dst.instruction_pointer;
+    handle_call t time ~src ~dst
+  | Trace { kind = Some (Return | Sysret | Iret); src; dst; _ } ->
+    process_pushtraps_and_poptraps t ~src ~time;
+    t.last_known_instruction_pointer <- Some dst.instruction_pointer;
+    handle_return t time ~dst
+  | Trace { kind = Some (Jump | Async); src; dst; _ } ->
+    process_pushtraps_and_poptraps t ~src ~time;
+    t.last_known_instruction_pointer <- Some dst.instruction_pointer;
+    if is_entertrap t ~dst then handle_entertrap t time else handle_jump t time ~dst
   (* TODO *)
   | Trace { kind = Some Tx_abort | None; _ }
   | Power _ | Stacktrace_sample _ | Event_sample _ -> ()
@@ -307,8 +409,8 @@ module Writer : sig
   type t
 
   val create : Tracing.Trace.t -> Tracing.Trace.Thread.t -> Elf.Addr_table.t -> t @ local
-  val emit_frame_enter : t @ local -> Timestamp.t -> Location.t -> unit
-  val emit_frame_exit : t @ local -> Timestamp.t -> Location.t -> unit
+  val emit_frame_enter : t @ local -> Timestamp.t -> Frame.t -> unit
+  val emit_frame_exit : t @ local -> Timestamp.t -> Frame.t -> unit
 end = struct
   type t =
     { mutable last_time : Timestamp.t @@ global
@@ -371,32 +473,42 @@ end = struct
            | None -> []))
   ;;
 
-  let emit_frame_enter (t : t) (time : Timestamp.t) (location : Location.t) =
-    assert (Timestamp.( >= ) time t.last_time);
-    t.last_time <- time;
-    Vec.push_back t.active_frames location.symbol;
-    if debug then eprintf "Enter %s\n" (Symbol.display_name location.symbol);
-    Tracing.Trace.write_duration_begin
-      t.trace
-      ~args:(location_args t.debug_info location)
-      ~thread:t.thread
-      ~name:(Symbol.display_name location.symbol)
-      ~time:(time :> Time_ns.Span.t)
-      ~category:""
+  let emit_frame_enter (t : t) (time : Timestamp.t) (frame : Frame.t) =
+    (* Skip trap frames - they are synthetic markers, not real function calls *)
+    if frame.is_trap
+    then ()
+    else (
+      let location = frame.location in
+      assert (Timestamp.( >= ) time t.last_time);
+      t.last_time <- time;
+      Vec.push_back t.active_frames location.symbol;
+      if debug then eprintf "Enter %s\n" (Symbol.display_name location.symbol);
+      Tracing.Trace.write_duration_begin
+        t.trace
+        ~args:(location_args t.debug_info location)
+        ~thread:t.thread
+        ~name:(Symbol.display_name location.symbol)
+        ~time:(time :> Time_ns.Span.t)
+        ~category:"")
   ;;
 
-  let emit_frame_exit t (time : Timestamp.t) (location : Location.t) =
-    assert (Timestamp.( >= ) time t.last_time);
-    t.last_time <- time;
-    [%test_result: Symbol.t] ~expect:(Vec.pop_back_exn t.active_frames) location.symbol;
-    if debug then eprintf "Exit %s\n" (Symbol.display_name location.symbol);
-    Tracing.Trace.write_duration_end
-      t.trace
-      ~args:[]
-      ~thread:t.thread
-      ~name:(Symbol.display_name location.symbol)
-      ~time:(time :> Time_ns.Span.t)
-      ~category:""
+  let emit_frame_exit t (time : Timestamp.t) (frame : Frame.t) =
+    (* Skip trap frames - they are synthetic markers, not real function calls *)
+    if frame.is_trap
+    then ()
+    else (
+      let location = frame.location in
+      assert (Timestamp.( >= ) time t.last_time);
+      t.last_time <- time;
+      [%test_result: Symbol.t] ~expect:(Vec.pop_back_exn t.active_frames) location.symbol;
+      if debug then eprintf "Exit %s\n" (Symbol.display_name location.symbol);
+      Tracing.Trace.write_duration_end
+        t.trace
+        ~args:[]
+        ~thread:t.thread
+        ~name:(Symbol.display_name location.symbol)
+        ~time:(time :> Time_ns.Span.t)
+        ~category:"")
   ;;
 end
 
@@ -407,8 +519,8 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
   (* It would be reasonable to also have [Return]s consume time, but making them not consume
      time substantially reduces the frequency where we need to use zero-duration events.
      In general the traces are easier to read if returns aren't counted as consuming time. *)
-  let[@inline always] consumes_time : Control_flow.t -> bool = function
-    | Call | Jump -> true
+  let[@inline always] consumes_time : Callstack.t -> bool = function
+    | #{ leaf = {is_trap = false; _}; control_flow = Call | Jump; _ } -> true
     | _ -> false
   in
   let len = Nonempty_vec.length callstacks in
@@ -418,7 +530,7 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
     (* Find the end of the run of events with the same timestamp *)
     let mutable run_end = i in
     let mutable num_time_consuming_events =
-      consumes_time (Nonempty_vec.get callstacks i).#control_flow |> Bool.to_int
+      consumes_time (Nonempty_vec.get callstacks i) |> Bool.to_int
     in
     while
       run_end + 1 < len
@@ -426,7 +538,7 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
     do
       num_time_consuming_events
       <- num_time_consuming_events
-         + (consumes_time (Nonempty_vec.get callstacks (run_end + 1)).#control_flow
+         + (consumes_time (Nonempty_vec.get callstacks (run_end + 1))
             |> Bool.to_int);
       run_end <- run_end + 1
     done;
@@ -454,7 +566,7 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
            it'd take to achieve it. *)
         Nonempty_vec.set callstacks (i + k) #{ cs with time = smeared_time };
         time_consuming_events_seen
-        <- time_consuming_events_seen + (consumes_time cs.#control_flow |> Bool.to_int)
+        <- time_consuming_events_seen + (consumes_time cs |> Bool.to_int)
       done
       (* else: final run - keep original times *));
     i <- run_end + 1
@@ -484,7 +596,7 @@ let write_trace
              need to do this because otherwise we'd be missing parent frames in the trace that
              we discovered by returning into them (see the [Null] case in [handle_return]). *)
           Frame.iter_rev parent_frame ~f:(stack_ fun frame ->
-            Writer.emit_frame_enter writer first_callstack.#time frame.location)
+            Writer.emit_frame_enter writer first_callstack.#time frame)
       in
       (* Modify [t.callstacks] so that the first pair processed in
          [Nonempty_vec.iter_pairs] below calls [emit_frame_enter] for the leaf frame. *)
@@ -495,19 +607,19 @@ let write_trace
         let time = curr.#time in
         match curr.#control_flow with
         | Jump ->
-          Writer.emit_frame_exit writer time prev.#leaf.location;
-          Writer.emit_frame_enter writer time curr.#leaf.location
-        | Call -> Writer.emit_frame_enter writer time curr.#leaf.location
+          Writer.emit_frame_exit writer time prev.#leaf;
+          Writer.emit_frame_enter writer time curr.#leaf
+        | Call -> Writer.emit_frame_enter writer time curr.#leaf
         | Return { distance } ->
           Frame.iter_n prev.#leaf distance ~f:(stack_ fun frame ->
-            Writer.emit_frame_exit writer time frame.location)
+            Writer.emit_frame_exit writer time frame)
           [@nontail]);
     if exit_final_callstack
     then (
       (* Call [emit_frame_exit] for all remaining frames at the end of the segment. *)
       let last_callstack = Nonempty_vec.last t.callstacks in
       Frame.iter_n last_callstack.#leaf Int.max_value ~f:(stack_ fun frame ->
-        Writer.emit_frame_exit writer last_callstack.#time frame.location)
+        Writer.emit_frame_exit writer last_callstack.#time frame)
       [@nontail]))
 ;;
 
