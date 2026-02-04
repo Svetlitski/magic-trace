@@ -430,13 +430,18 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
 ;;
 
 module Writer : sig
-  type t
+  type 'thread t
 
-  val create : Tracing.Trace.t -> Tracing.Trace.Thread.t -> Elf.Addr_table.t -> t @ local
-  val emit_frame_enter : t @ local -> Timestamp.t -> Frame.t -> unit
-  val emit_frame_exit : t @ local -> Timestamp.t -> Frame.t -> unit
+  val create
+    :  (module Trace_writer_intf.S_trace with type thread = 'thread)
+    -> 'thread
+    -> Elf.Addr_table.t
+    -> 'thread t @ local
+
+  val emit_frame_enter : 'thread t @ local -> Timestamp.t -> Frame.t -> unit
+  val emit_frame_exit : 'thread t @ local -> Timestamp.t -> Frame.t -> unit
 end = struct
-  type t =
+  type 'thread t =
     { mutable last_time : Timestamp.t @@ global
     ; active_frames : Symbol.t Vec.t @@ global
     (** Strictly speaking maintaining [last_time] and [active_frames] is not necessary
@@ -444,17 +449,27 @@ end = struct
         invariants makes it *much* harder to figure out where things go wrong, because you
         would just end up with a mangled Perfetto trace but the [magic-trace] invocation
         would complete silently and successfully. *)
-    ; trace : Tracing.Trace.t @@ global
-    ; thread : Tracing.Trace.Thread.t @@ global
+    ; write_duration_begin :
+        (args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit) @@ global
+    ; write_duration_end :
+        (args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit) @@ global
     ; debug_info : Elf.Addr_table.t @@ global
     }
 
-  let create trace thread debug_info = exclave_
+  let create
+    (type thread)
+    (trace : (module Trace_writer_intf.S_trace with type thread = thread))
+    (thread : thread)
+    debug_info
+    = exclave_
+    let module T = (val trace) in
     stack_
       { last_time = Timestamp.zero
       ; active_frames = Vec.create ()
-      ; trace
-      ; thread
+      ; write_duration_begin =
+          (fun ~args ~name ~time -> T.write_duration_begin ~args ~thread ~name ~time)
+      ; write_duration_end =
+          (fun ~args ~name ~time -> T.write_duration_end ~args ~thread ~name ~time)
       ; debug_info
       }
   ;;
@@ -497,7 +512,7 @@ end = struct
            | None -> []))
   ;;
 
-  let emit_frame_enter (t : t) (time : Timestamp.t) (frame : Frame.t) =
+  let emit_frame_enter (local_ t : _ t) (time : Timestamp.t) (frame : Frame.t) =
     (* Skip trap frames - they are synthetic markers, not real function calls *)
     if not frame.is_trap
     then (
@@ -506,16 +521,13 @@ end = struct
       t.last_time <- time;
       Vec.push_back t.active_frames location.symbol;
       if debug then eprintf "Enter %s\n" (Symbol.display_name location.symbol);
-      Tracing.Trace.write_duration_begin
-        t.trace
+      t.write_duration_begin
         ~args:(location_args t.debug_info location)
-        ~thread:t.thread
         ~name:(Symbol.display_name location.symbol)
-        ~time:(time :> Time_ns.Span.t)
-        ~category:"")
+        ~time:(time :> Time_ns.Span.t))
   ;;
 
-  let emit_frame_exit t (time : Timestamp.t) (frame : Frame.t) =
+  let emit_frame_exit (t : _ t) (time : Timestamp.t) (frame : Frame.t) =
     (* Skip trap frames - they are synthetic markers, not real function calls *)
     if not frame.is_trap
     then (
@@ -524,13 +536,10 @@ end = struct
       t.last_time <- time;
       [%test_result: Symbol.t] ~expect:(Vec.pop_back_exn t.active_frames) location.symbol;
       if debug then eprintf "Exit %s\n" (Symbol.display_name location.symbol);
-      Tracing.Trace.write_duration_end
-        t.trace
+      t.write_duration_end
         ~args:[]
-        ~thread:t.thread
         ~name:(Symbol.display_name location.symbol)
-        ~time:(time :> Time_ns.Span.t)
-        ~category:"")
+        ~time:(time :> Time_ns.Span.t))
   ;;
 end
 
@@ -595,9 +604,10 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
 ;;
 
 let write_trace
+  (type thread)
   (t : t)
-  (trace : Tracing.Trace.t)
-  thread
+  (trace : (module Trace_writer_intf.S_trace with type thread = thread))
+  (thread : thread)
   debug_info
   ~enter_initial_callstack
   ~exit_final_callstack
