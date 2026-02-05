@@ -62,7 +62,7 @@ end = struct
   let rec find t target distance =
     match t with
     | { parent = Null; _ } -> #(Null, ~distance)
-    | { location = { symbol; _ }; _ } when Symbol.equal symbol target ->
+    | { is_trap = false; location = { symbol; _ }; _ } when Symbol.equal symbol target ->
       #(This t, ~distance)
     | { parent = This parent; _ } -> find parent target (distance + 1)
   ;;
@@ -323,11 +323,12 @@ let handle_poptrap (t : t) (time : Timestamp.t) =
          leaf = Or_null.value_exn current.parent
        ; control_flow = Return { distance = 1 }
        }
+  else Debug.eprint "WARNING: Unexpected mismatched poptrap!!!"
 ;;
 
 (** Handle an entertrap (exception raised, jumping to handler). Searches up the callstack
     for the nearest trap frame and unwinds to its parent. *)
-let handle_entertrap (t : t) (time : Timestamp.t) =
+let handle_entertrap (t : t) (time : Timestamp.t) ~dst =
   match Frame.find_trap (current_frame t) with
   | #(This trap_frame, ~distance) ->
     (* Unwind to trap frame's parent ([distance + 1] closes frames including trap frame) *)
@@ -338,10 +339,10 @@ let handle_entertrap (t : t) (time : Timestamp.t) =
          leaf = Or_null.value_exn trap_frame.parent
        ; control_flow = Return { distance = distance + 1 }
        }
-  | #(Null, ~distance:_) ->
-    (* No trap found - this can happen if we started tracing after the pushtrap.
-       Fall back to doing nothing - the jump handling will take care of it. *)
-    ()
+  | #(Null, ~distance) ->
+    Nonempty_vec.push_back
+      t.callstacks
+      #{ time; leaf = replace_root t dst; control_flow = Return { distance } }
 ;;
 
 let[@cold] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
@@ -405,7 +406,7 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
     t.last_known_instruction_pointer <- dst.instruction_pointer;
     (match kind with
      | Call | Syscall | Hardware_interrupt | Interrupt -> handle_call t time ~src ~dst
-     | (Return | Jump) when is_entertrap t ~dst -> handle_entertrap t time
+     | (Return | Jump) when is_entertrap t ~dst -> handle_entertrap t time ~dst
      | Return | Sysret | Iret -> handle_return t time ~dst
      | Jump | Tx_abort | Async -> handle_jump t time ~dst)
   | Trace { kind = None; _ } -> ()
