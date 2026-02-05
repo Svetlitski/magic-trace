@@ -328,9 +328,10 @@ let handle_poptrap (t : t) (time : Timestamp.t) =
 
 (** Handle an entertrap (exception raised, jumping to handler). Searches up the callstack
     for the nearest trap frame and unwinds to its parent. *)
-let handle_entertrap (t : t) (time : Timestamp.t) ~dst =
+let handle_entertrap (t : t) (time : Timestamp.t) ~(dst : Location.t) =
   match Frame.find_trap (current_frame t) with
   | #(This trap_frame, ~distance) ->
+    assert (Symbol.equal trap_frame.location.symbol dst.symbol);
     (* Unwind to trap frame's parent ([distance + 1] closes frames including trap frame) *)
     Nonempty_vec.push_back
       t.callstacks
@@ -371,6 +372,7 @@ let process_pushtraps_and_poptraps t ~src ~time =
   match t.ocaml_exception_info with
   | Null -> ()
   | This ocaml_exception_info ->
+    if Int64.(t.last_known_instruction_pointer <> max_value) then
     Ocaml_exception_info.iter_pushtraps_and_poptraps_in_range
       ocaml_exception_info
       ~from:t.last_known_instruction_pointer
@@ -394,16 +396,18 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   print event time;
   assert (Timestamp.( >= ) time t.last_event_time);
   t.last_event_time <- time;
+  (match event with
+  | Trace {src; dst; _} ->
+    process_pushtraps_and_poptraps t ~src ~time;
+    t.last_known_instruction_pointer <- dst.instruction_pointer;
+  | _ -> ());
   match event with
   (* TODO Get the untraced "kind" right instead of always showing [Location.untraced] for untraced time. *)
   | Trace { trace_state_change = Some Start; dst; _ } ->
-    t.last_known_instruction_pointer <- dst.instruction_pointer;
     handle_return t time ~dst
   | Trace { trace_state_change = Some End; src; dst = _; _ } ->
     handle_call t time ~src ~dst:Location.untraced
   | Trace { trace_state_change = None; kind = Some kind; src; dst } ->
-    process_pushtraps_and_poptraps t ~src ~time;
-    t.last_known_instruction_pointer <- dst.instruction_pointer;
     (match kind with
      | Call | Syscall | Hardware_interrupt | Interrupt -> handle_call t time ~src ~dst
      | (Return | Jump) when is_entertrap t ~dst -> handle_entertrap t time ~dst
