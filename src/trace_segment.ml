@@ -22,7 +22,7 @@ module Frame : sig
 
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
   val iter_rev : t -> f:local_ (t -> unit) -> unit
-  val is_ancestor : t -> ancestor:t -> bool
+  val find_ancestor : t -> ancestor:t -> int Or_null.t
 
   module Sentinel : sig
     type frame := t
@@ -80,14 +80,16 @@ end = struct
       f t
   ;;
 
-  let rec is_ancestor t ~ancestor =
+  let rec find_ancestor t ~ancestor distance =
     if phys_equal t ancestor
-    then true
+    then This distance
     else (
       match t with
-      | { parent = Null; _ } -> false
-      | { parent = This parent; _ } -> is_ancestor parent ~ancestor)
+      | { parent = Null; _ } -> Null
+      | { parent = This parent; _ } -> find_ancestor parent ~ancestor (distance + 1))
   ;;
+
+  let find_ancestor t ~ancestor = find_ancestor t ~ancestor 0
 
   module Sentinel = struct
     type nonrec t = t
@@ -180,7 +182,7 @@ let create_continuing_from existing ~in_filtered_region =
     callstacks =
       Nonempty_vec.create
         (#{ last_callstack with control_flow = Return { distance = 0 } } : Callstack.t)
-  ; exception_handlers = Vec.create ()
+  ; exception_handlers = Vec.copy existing.exception_handlers
   ; in_filtered_region
   }
 ;;
@@ -320,11 +322,40 @@ let[@inline always] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
   if debug then print event time
 ;;
 
-let is_entertrap t ~(dst : Location.t) =
+let is_ocaml_exception_handler t ~(dst : Location.t) =
   match t.ocaml_exception_info with
   | Null -> false
   | This ocaml_exception_info ->
     Ocaml_exception_info.is_entertrap ocaml_exception_info ~addr:dst.instruction_pointer
+;;
+
+let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
+  match Vec.last t.exception_handlers with
+  | Null ->
+    (* Unexpected *)
+    handle_return t time ~dst
+  | This frame ->
+    Vec.pop_back_unit_exn t.exception_handlers;
+    assert (Symbol.equal frame.location.symbol dst.symbol);
+    (match Frame.find_ancestor (current_frame t) ~ancestor:frame with
+     | Null ->
+       let message =
+         match Frame.find (current_frame t) dst.symbol with
+         | #(Null, ..) -> "This is likely to be a bug."
+         | #(This _, ..) ->
+           "This is deeply concerning because another frame with a matching symbol was \
+            found. This is very likely to be a bug."
+       in
+       eprintf
+         "Warning: [exception_handlers] appears to be out-of-sync with [callstacks]. %s\n\
+          %!"
+         message;
+       handle_return t time ~dst
+     | This distance ->
+       eprintf "Successfully handling exception\n%!";
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time; leaf = frame; control_flow = Return { distance } })
 ;;
 
 let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
@@ -343,7 +374,9 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
           ~f:(stack_ fun (_address, kind) ->
             match kind with
             | Pushtrap -> Vec.push_back t.exception_handlers (current_frame t)
-            | Poptrap -> Vec.pop_back_unit_exn t.exception_handlers);
+            | Poptrap ->
+              if not (Vec.is_empty t.exception_handlers)
+              then Vec.pop_back_unit_exn t.exception_handlers);
         t.last_known_instruction_pointer <- dst.instruction_pointer
       | _ -> ()));
   (match event with
@@ -354,6 +387,8 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
    | Trace { trace_state_change = None; kind = Some kind; src; dst } ->
      (match kind with
       | Call | Syscall | Hardware_interrupt | Interrupt -> handle_call t time ~src ~dst
+      | (Return | Jump) when is_ocaml_exception_handler t ~dst ->
+        handle_ocaml_exception t time ~dst
       | Return | Sysret | Iret -> handle_return t time ~dst
       | Jump | Tx_abort | Async -> handle_jump t time ~dst)
    | Trace { kind = None; _ } -> ()
