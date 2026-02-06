@@ -22,6 +22,7 @@ module Frame : sig
 
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
   val iter_rev : t -> f:local_ (t -> unit) -> unit
+  val is_ancestor : t -> ancestor:t -> bool
 
   module Sentinel : sig
     type frame := t
@@ -79,6 +80,15 @@ end = struct
       f t
   ;;
 
+  let rec is_ancestor t ~ancestor =
+    if phys_equal t ancestor
+    then true
+    else (
+      match t with
+      | { parent = Null; _ } -> false
+      | { parent = This parent; _ } -> is_ancestor parent ~ancestor)
+  ;;
+
   module Sentinel = struct
     type nonrec t = t
 
@@ -133,11 +143,20 @@ type t =
       order to make bugs obvious. *)
   ; callstacks : Callstack.t Nonempty_vec.t
   ; ocaml_exception_info : Ocaml_exception_info.t Or_null.t
+  ; exception_handlers : Frame.t Vec.t
+  (** The currently active OCaml exception handlers. This is used to determine which frame
+      to return to when [ocaml_exception_info] indicates that the current event is an
+      OCaml exception being raised in the traced program.
+
+      In contrast to [callstacks] — which records the entire history of control-flow for
+      later examination — [exception_handlers] represents the state **as of the event we
+      are currently processing**, and as such is only used during the "ingestion" phase
+      (i.e. while calls are still being made to [add_event]). *)
   ; mutable last_known_instruction_pointer : int64
   ; in_filtered_region : bool
   }
 
-let create _ocaml_exception_info ~in_filtered_region () =
+let create ocaml_exception_info ~in_filtered_region () =
   let root = Frame.Sentinel.create () in
   { root
   ; last_event_time = Timestamp.zero
@@ -148,7 +167,8 @@ let create _ocaml_exception_info ~in_filtered_region () =
           ; control_flow = Return { distance = Int.max_value }
           }
          : Callstack.t)
-  ; ocaml_exception_info = Null
+  ; exception_handlers = Vec.create ()
+  ; ocaml_exception_info = Or_null.of_option ocaml_exception_info
   ; last_known_instruction_pointer = Int64.max_value
   ; in_filtered_region
   }
@@ -160,8 +180,8 @@ let create_continuing_from existing ~in_filtered_region =
     callstacks =
       Nonempty_vec.create
         (#{ last_callstack with control_flow = Return { distance = 0 } } : Callstack.t)
+  ; exception_handlers = Vec.create ()
   ; in_filtered_region
-  ; ocaml_exception_info = Null
   }
 ;;
 
@@ -300,10 +320,32 @@ let[@inline always] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
   if debug then print event time
 ;;
 
+let is_entertrap t ~(dst : Location.t) =
+  match t.ocaml_exception_info with
+  | Null -> false
+  | This ocaml_exception_info ->
+    Ocaml_exception_info.is_entertrap ocaml_exception_info ~addr:dst.instruction_pointer
+;;
+
 let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   print event time;
   assert (Timestamp.( >= ) time t.last_event_time);
   t.last_event_time <- time;
+  (match t.ocaml_exception_info with
+   | Null -> ()
+   | This ocaml_exception_info ->
+     (match event with
+      | Trace { src; dst; _ } ->
+        Ocaml_exception_info.iter_pushtraps_and_poptraps_in_range
+          ocaml_exception_info
+          ~from:t.last_known_instruction_pointer
+          ~to_:src.instruction_pointer
+          ~f:(stack_ fun (_address, kind) ->
+            match kind with
+            | Pushtrap -> Vec.push_back t.exception_handlers (current_frame t)
+            | Poptrap -> Vec.pop_back_unit_exn t.exception_handlers);
+        t.last_known_instruction_pointer <- dst.instruction_pointer
+      | _ -> ()));
   (match event with
    (* TODO Get the untraced "kind" right instead of always showing [Location.untraced] for untraced time. *)
    | Trace { trace_state_change = Some Start; dst; _ } -> handle_return t time ~dst
