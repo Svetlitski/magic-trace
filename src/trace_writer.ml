@@ -710,7 +710,6 @@ let ret t (thread_info : _ Thread_info.t) ~time : unit =
 
 let write_trace_segments (type thread) (t : thread inner) =
   Hashtbl.iter t.thread_info ~f:(fun thread_info ->
-    eprintf "NUMBER OF TRACE SEGMENTS: %d\n" (Nonempty_vec.length thread_info.trace_segments);
     Nonempty_vec.iter thread_info.trace_segments ~f:(fun trace_segment ->
       if Trace_segment.in_filtered_region trace_segment
       then
