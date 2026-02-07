@@ -9,9 +9,10 @@ module Frame : sig
   type t = private
     { mutable location : Event.Location.t
     ; mutable parent : t Or_null.t
+    ; is_inlined : bool
     }
 
-  val create : Location.t -> parent:t -> t
+  val create : ?is_inlined:bool -> Location.t -> parent:t -> t
 
   (** Find the first frame whose [location.symbol] matches the provided argument.
 
@@ -23,6 +24,8 @@ module Frame : sig
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
   val iter_rev : t -> f:local_ (t -> unit) -> unit
   val find_ancestor : t -> ancestor:t -> int Or_null.t
+
+  val find_first_non_inlined : t -> t
 
   module Sentinel : sig
     type frame := t
@@ -50,15 +53,18 @@ end = struct
   type t =
     { mutable location : Event.Location.t
     ; mutable parent : t Or_null.t
+    ; is_inlined : bool
     }
 
-  let[@inline always] create location ~parent = { location; parent = This parent }
+  let[@inline always] create ?(is_inlined = false) location ~parent =
+    { location; parent = This parent; is_inlined }
+  ;;
 
   let rec find t target distance =
     match t with
     | { parent = Null; _ } -> #(Null, ~distance)
-    | { location = { symbol; _ }; _ } when Symbol.equal symbol target ->
-      #(This t, ~distance)
+    | { is_inlined = false; location = { symbol; _ }; _ } when Symbol.equal symbol target
+      -> #(This t, ~distance)
     | { parent = This parent; _ } -> find parent target (distance + 1)
   ;;
 
@@ -91,6 +97,15 @@ end = struct
 
   let find_ancestor t ~ancestor = find_ancestor t ~ancestor 0
 
+  let rec find_first_non_inlined t =
+    match t with
+    | { is_inlined = false; _ } -> t
+    | { parent = This parent; _ } -> find_first_non_inlined parent
+    | { parent = Null; is_inlined = true; _ } ->
+      (* It's impossible to have a [Sentinel.t] that's marked as being inlined. *)
+      assert false
+  ;;
+
   module Sentinel = struct
     type nonrec t = t
 
@@ -98,7 +113,9 @@ end = struct
       { instruction_pointer = 0L; symbol_offset = 0; symbol = Unknown }
     ;;
 
-    let[@inline always] create () = { location = sentinel_location; parent = Null }
+    let[@inline always] create () =
+      { location = sentinel_location; parent = Null; is_inlined = false }
+    ;;
 
     let become_frame t location ~parent =
       t.location <- location;
@@ -378,15 +395,16 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
    | This ocaml_exception_info ->
      (match event with
       | Trace { src; dst; _ } ->
+        let current_physical_frame = Frame.find_first_non_inlined (current_frame t) in
         Ocaml_exception_info.iter_pushtraps_and_poptraps_in_range
           ocaml_exception_info
           ~from:t.last_known_instruction_pointer
           ~to_:src.instruction_pointer
           ~f:(stack_ fun (_address, kind) ->
             match kind with
-            | Pushtrap -> Vec.push_back t.exception_handlers (current_frame t)
+            | Pushtrap -> Vec.push_back t.exception_handlers current_physical_frame
             | Poptrap ->
-              if phys_equal (This (current_frame t)) (Vec.last t.exception_handlers)
+              if phys_equal (This current_physical_frame) (Vec.last t.exception_handlers)
               then Vec.pop_back_unit_exn t.exception_handlers
               else
                 eprintf
