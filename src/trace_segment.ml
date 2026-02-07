@@ -23,6 +23,7 @@ module Frame : sig
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
   val iter_rev : t -> f:local_ (t -> unit) -> unit
   val find_ancestor : t -> ancestor:t -> int Or_null.t
+  val is_sentinel : t -> bool
 
   module Sentinel : sig
     type frame := t
@@ -90,6 +91,7 @@ end = struct
   ;;
 
   let find_ancestor t ~ancestor = find_ancestor t ~ancestor 0
+  let[@inline always] is_sentinel t = Or_null.is_null t.parent
 
   module Sentinel = struct
     type nonrec t = t
@@ -272,36 +274,30 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
 
 let handle_jump (t : t) (time : Timestamp.t) ~(dst : Location.t) =
   let current_frame = current_frame t in
-  match Frame.find current_frame dst.symbol with
-  | #(This _, ~distance:0) ->
+  if Symbol.equal current_frame.location.symbol dst.symbol
+  then
     (* [dst] matches [current_frame t]. This is either a branch within a function, or
        tail-recursion. For now we don't need to do anything in this case. That will change
        once we support inlined frames. *)
     ()
-  | #(This dst_frame, ~distance) ->
-    (* [dst] exists, but is higher up the callstack. This is likely an exception, or some
-       other exotic control-flow. *)
-    Nonempty_vec.push_back
-      t.callstacks
-      #{ time; leaf = dst_frame; control_flow = Return { distance } }
-  | #(Null, ~distance:0) ->
+  else if Frame.is_sentinel current_frame
+  then
     (* This is probably a non-recursive tail-call, but we don't know anything
        about the previous frame, so we treat this is a [Call] because we only
        want to emit a frame-enter while writing out the trace. *)
     Nonempty_vec.push_back
       t.callstacks
       #{ time; leaf = Frame.create dst ~parent:(t.root :> Frame.t); control_flow = Call }
-  | #(Null, ~distance:_) ->
+  else (
     (* This is probably a non-recursive tail-call. *)
     let parent =
-      (* We know this call will never raise because only sentinels have a [Null] parent,
-         and the [#(Null, ~distance:0)] case above handles the case where [current_frame]
-         is a sentinel. *)
+      (* We know this call will never raise because we can only end up here
+         if [Frame.is_sentinel] is false. *)
       Or_null.value_exn current_frame.parent
     in
     Nonempty_vec.push_back
       t.callstacks
-      #{ time; leaf = Frame.create dst ~parent; control_flow = Jump }
+      #{ time; leaf = Frame.create dst ~parent; control_flow = Jump })
 ;;
 
 let[@cold] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
@@ -332,7 +328,7 @@ let is_ocaml_exception_handler t ~(dst : Location.t) =
 let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
   match Vec.last t.exception_handlers with
   | Null ->
-    (* Unexpected *)
+    eprintf "Warning 1: [exception_handlers] appears to be out-of-sync with callstacks.\n%!";
     handle_return t time ~dst
   | This frame ->
     Vec.pop_back_unit_exn t.exception_handlers;
@@ -347,12 +343,11 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
             found. This is very likely to be a bug."
        in
        eprintf
-         "Warning: [exception_handlers] appears to be out-of-sync with [callstacks]. %s\n\
+         "Warning 2: [exception_handlers] appears to be out-of-sync with [callstacks]. %s\n\
           %!"
          message;
        handle_return t time ~dst
      | This distance ->
-       eprintf "Successfully handling exception\n%!";
        Nonempty_vec.push_back
          t.callstacks
          #{ time; leaf = frame; control_flow = Return { distance } })
@@ -375,8 +370,13 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
             match kind with
             | Pushtrap -> Vec.push_back t.exception_handlers (current_frame t)
             | Poptrap ->
-              if not (Vec.is_empty t.exception_handlers)
-              then Vec.pop_back_unit_exn t.exception_handlers);
+              if phys_equal (This (current_frame t)) (Vec.last t.exception_handlers)
+              then Vec.pop_back_unit_exn t.exception_handlers
+              else
+                eprintf
+                  "Warning 3: [exception_handlers] appears to be out-of-sync with \
+                   callstacks.\n\
+                   %!");
         t.last_known_instruction_pointer <- dst.instruction_pointer
       | _ -> ()));
   (match event with
