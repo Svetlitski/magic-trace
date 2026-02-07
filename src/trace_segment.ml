@@ -260,10 +260,15 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
        Nonempty_vec.push_back
          t.callstacks
          #{ time; leaf = dst_frame; control_flow = Return { distance = distance + 1 } }
+     | #(Null, ~distance:0) ->
+       (* Our [parent_frame] is the sentinel. We treat this identically to the [Null] case
+          in the outer match, for the same reasons stated in the comment there. *)
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time; leaf = replace_root t dst; control_flow = Return { distance = 0 + 1 } }
      | #(Null, ~distance:_) ->
        (* Intuitively you would think we should call [replace_root t dst] here like we do
-          in the [Null] case in the outer match, but empirically doing so produces
-          horribly broken traces. *)
+          in the other cases, but empirically doing so produces horribly broken traces. *)
        Nonempty_vec.push_back
          t.callstacks
          #{ time; leaf = parent_frame; control_flow = Return { distance = 1 } };
@@ -307,7 +312,7 @@ let[@cold] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
       ~mach:()
       [%message
         (kind : Event.Kind.t option)
-          ~time:(Time_ns.Span.to_int_ns (time :> Time_ns.Span.t) % 10000 : int)
+          ~time:(Time_ns.Span.to_int_ns (time :> Time_ns.Span.t) % 10000000 : int)
           ~src:(Symbol.display_name src.symbol)
           ~dst:(Symbol.display_name dst.symbol)
           (trace_state_change : Trace_state_change.t option)]
@@ -328,12 +333,27 @@ let is_ocaml_exception_handler t ~(dst : Location.t) =
 let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
   match Vec.last t.exception_handlers with
   | Null ->
-    eprintf "Warning 1: [exception_handlers] appears to be out-of-sync with callstacks.\n%!";
-    handle_return t time ~dst
+    eprintf
+      "Warning 1: [exception_handlers] appears to be out-of-sync with callstacks.\n%!";
+    (match Frame.find (current_frame t) dst.symbol with
+     | #(This dst_frame, ~distance) ->
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time; leaf = dst_frame; control_flow = Return { distance } }
+     | #(Null, ~distance) ->
+       (* We are probably raising into an exception handler much further up the stack that we never saw the entrance into. *)
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time; leaf = replace_root t dst; control_flow = Return { distance } })
   | This frame ->
     Vec.pop_back_unit_exn t.exception_handlers;
     assert (Symbol.equal frame.location.symbol dst.symbol);
     (match Frame.find_ancestor (current_frame t) ~ancestor:frame with
+     | This distance ->
+       (* This is the happy case where our exception handler tracking is working as expected. *)
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time; leaf = frame; control_flow = Return { distance } }
      | Null ->
        let message =
          match Frame.find (current_frame t) dst.symbol with
@@ -346,11 +366,7 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
          "Warning 2: [exception_handlers] appears to be out-of-sync with [callstacks]. %s\n\
           %!"
          message;
-       handle_return t time ~dst
-     | This distance ->
-       Nonempty_vec.push_back
-         t.callstacks
-         #{ time; leaf = frame; control_flow = Return { distance } })
+       handle_return t time ~dst)
 ;;
 
 let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
