@@ -23,7 +23,6 @@ module Frame : sig
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
   val iter_rev : t -> f:local_ (t -> unit) -> unit
   val find_ancestor : t -> ancestor:t -> int Or_null.t
-  val is_sentinel : t -> bool
 
   module Sentinel : sig
     type frame := t
@@ -91,7 +90,6 @@ end = struct
   ;;
 
   let find_ancestor t ~ancestor = find_ancestor t ~ancestor 0
-  let[@inline always] is_sentinel t = Or_null.is_null t.parent
 
   module Sentinel = struct
     type nonrec t = t
@@ -288,24 +286,23 @@ let handle_jump (t : t) (time : Timestamp.t) ~(dst : Location.t) =
        tail-recursion. For now we don't need to do anything in this case. That will change
        once we support inlined frames. *)
     ()
-  else if Frame.is_sentinel current_frame
-  then
-    (* This is probably a non-recursive tail-call, but we don't know anything
-       about the previous frame, so we treat this is a [Call] because we only
-       want to emit a frame-enter while writing out the trace. *)
-    Nonempty_vec.push_back
-      t.callstacks
-      #{ time; leaf = Frame.create dst ~parent:(t.root :> Frame.t); control_flow = Call }
   else (
-    (* This is probably a non-recursive tail-call. *)
-    let parent =
-      (* We know this call will never raise because we can only end up here
-         if [Frame.is_sentinel] is false. *)
-      Or_null.value_exn current_frame.parent
-    in
-    Nonempty_vec.push_back
-      t.callstacks
-      #{ time; leaf = Frame.create dst ~parent; control_flow = Jump })
+    match current_frame.parent with
+    | Null ->
+      (* This is probably a non-recursive tail-call, but we don't know anything
+         about the previous frame, so we treat this is a [Call] because we only
+         want to emit a frame-enter while writing out the trace. *)
+      Nonempty_vec.push_back
+        t.callstacks
+        #{ time
+         ; leaf = Frame.create dst ~parent:(t.root :> Frame.t)
+         ; control_flow = Call
+         }
+    | This parent ->
+      (* This is probably a non-recursive tail-call. *)
+      Nonempty_vec.push_back
+        t.callstacks
+        #{ time; leaf = Frame.create dst ~parent; control_flow = Jump })
 ;;
 
 let[@cold] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
