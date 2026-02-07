@@ -257,6 +257,10 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
        account for the one extra frame implicitly traversed by doing this. *)
     (match Frame.find parent_frame dst.symbol with
      | #(This dst_frame, ~distance) ->
+       (* 99% of the time [distance] should be 0, indicating we are returning to
+          [parent_frame] as expected. We allow for the possibility of "long" returns to
+          account for [Sysret]/[Iret] events that return to userspace directly from deep
+          within their kernel/interrupt stack. *)
        Nonempty_vec.push_back
          t.callstacks
          #{ time; leaf = dst_frame; control_flow = Return { distance = distance + 1 } }
@@ -267,14 +271,13 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
          t.callstacks
          #{ time; leaf = replace_root t dst; control_flow = Return { distance = 0 + 1 } }
      | #(Null, ~distance:_) ->
-       (* Intuitively you would think we should call [replace_root t dst] here like we do
-          in the other cases, but empirically doing so produces horribly broken traces. *)
+       (* Something is probably wrong if we ever make it to this case, where the state
+          we're maintaining and the event we are processing seem to completely disagree.
+          Treating it like a tail-call seems like the least bad option, and at the very
+          least gets us to agree with the event stream that the current frame is [dst]. *)
        Nonempty_vec.push_back
          t.callstacks
-         #{ time; leaf = parent_frame; control_flow = Return { distance = 1 } };
-       Nonempty_vec.push_back
-         t.callstacks
-         #{ time; leaf = Frame.create dst ~parent:parent_frame; control_flow = Call })
+         #{ time; leaf = Frame.create dst ~parent:parent_frame; control_flow = Jump })
 ;;
 
 let handle_jump (t : t) (time : Timestamp.t) ~(dst : Location.t) =
