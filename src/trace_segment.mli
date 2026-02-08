@@ -4,7 +4,12 @@ open! Core
     thread. *)
 type t
 
-val create : Ocaml_exception_info.t option -> in_filtered_region:bool -> unit -> t
+val create
+  :  ?resolve_inlined_frames:(Event.Location.t -> Symbolizer.Inlined_frame.t array)
+  -> Ocaml_exception_info.t option
+  -> in_filtered_region:bool
+  -> unit
+  -> t
 
 (** Create a new trace segment that continues from the state of an existing segment,
     taking the existing segment's last callstack as the new segment's first callstack. *)

@@ -116,7 +116,6 @@ CAMLprim value magic_trace_llvm_symbolize_address(value v_executable_file,
   // The last frame corresponds to the function itself, not any of its inlined children.
   demangled_name =
       ocaml_string_of_cpp_string(frames.getFrame(num_inlined_frames).FunctionName);
-  printf("demangled_name=%s, num_inlined_frames=%u\n", (char*)demangled_name, num_inlined_frames);
   response = caml_alloc_small(2, /*tag=*/0);
   auto *response_ptr = (struct response *)response;
   *response_ptr = (struct response){.demangled_name = demangled_name,

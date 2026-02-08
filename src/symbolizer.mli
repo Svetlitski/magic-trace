@@ -7,7 +7,7 @@ module Inlined_frame : sig
     ; demangled_name : string
     ; filename : string
     }
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, equal]
 
   val display_name : t -> string
 end
