@@ -24,7 +24,6 @@ module Frame : sig
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
   val iter_rev : t -> f:local_ (t -> unit) -> unit
   val find_ancestor : t -> ancestor:t -> int Or_null.t
-
   val find_first_non_inlined : t -> t
 
   module Sentinel : sig
@@ -216,6 +215,18 @@ let replace_root t location =
   root
 ;;
 
+let inlined_frames ({ instruction_pointer; dso; _ } : Location.t)
+  : Symbolizer.Inlined_frame.t array
+  =
+  match Symbolizer.symbolize ~executable:dso ~addr:instruction_pointer with
+  | None -> [||]
+  | Some { demangled_name = _; inlined_frames } ->
+    assert (not (Array.is_empty inlined_frames));
+    inlined_frames
+;;
+
+let _ = inlined_frames
+
 (* [handle_call] uses [src], unlike the other event handlers. The rationale for this
    is that in the context of a call, [src] is the parent frame of the call to [dst]
    and thus *it continues to exist*. We want our callstacks to reflect that. *)
@@ -295,19 +306,14 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
          #{ time; leaf = Frame.create dst ~parent:parent_frame; control_flow = Jump })
 ;;
 
-let symbolize ({instruction_pointer; dso; _} : Location.t) =
-  Symbolizer.symbolize ~executable:dso ~addr:instruction_pointer
-;;
-
 let handle_jump (t : t) (time : Timestamp.t) ~(dst : Location.t) =
   let current_frame = current_frame t in
   if Symbol.equal current_frame.location.symbol dst.symbol
-  then (
+  then
     (* [dst] matches [current_frame t]. This is either a branch within a function, or
        tail-recursion. For now we don't need to do anything in this case. That will change
        once we support inlined frames. *)
-    eprint_s ~mach:() [%message "" ~prev:(symbolize current_frame.location : Symbolizer.Response.t) ~curr:(symbolize dst : Symbolizer.Response.t)];
-  )
+    ()
   else (
     match current_frame.parent with
     | Null ->
