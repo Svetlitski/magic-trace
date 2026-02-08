@@ -28,6 +28,7 @@ module Location : sig
     { instruction_pointer : int64
     ; symbol : Symbol.t
     ; symbol_offset : int
+    ; dso : Filename.t
     }
   [@@deriving sexp, fields, bin_io]
 

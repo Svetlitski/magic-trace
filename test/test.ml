@@ -38,7 +38,7 @@ end = struct
   let addr () = Random.State.int64_incl !rng 0L 0x7fffffffffffL
   let offset () = Random.State.int_incl !rng 0 0x1000
   let unknown = Symbol.From_perf "unknown"
-  let loc symbol = { Event.Location.instruction_pointer = 0L; symbol; symbol_offset = 0 }
+  let loc symbol = { Event.Location.instruction_pointer = 0L; symbol; symbol_offset = 0; dso = "" }
 
   let symbol () =
     Symbol.From_perf
@@ -50,6 +50,7 @@ end = struct
     { instruction_pointer = addr ()
     ; symbol = Option.value symbol ~default:(Symbol.From_perf "")
     ; symbol_offset = offset ()
+    ; dso = ""
     }
   ;;
 
