@@ -144,6 +144,18 @@ type t =
   (** Strictly speaking maintaining [last_event_time] is not necessary, but we do so in
       order to make bugs obvious. *)
   ; callstacks : Callstack.t Nonempty_vec.t
+  (** Our reconstruction of the program's control-flow based on the input event stream.
+      When appending new elements to [callstacks], it's **vitally important** to maintain
+      the following invariants in order for [callstacks] to be correctly processed during
+      [write_trace]:
+
+      1. A callstack with [control_flow = Call] introduces **exactly** one new frame which
+         was not present in the callstack immediately preceding it. This new frame is its
+         [leaf].
+      2. A callstack with [control_flow = Return { distance }] **exits** [distance]
+         frames, starting from the leaf of the callstack immediately preceding it.
+      3. A callstack with [control_flow = Jump] exits the [leaf] of the callstack
+         immediately preceding it, and enters a new frame, which is its [leaf]. *)
   ; ocaml_exception_info : Ocaml_exception_info.t Or_null.t
   ; exception_handlers : Frame.t Vec.t
   (** The currently active OCaml exception handlers. This is used to determine which frame
