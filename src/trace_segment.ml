@@ -397,20 +397,36 @@ let resolve_inlined_after_return (t : t) (time : Timestamp.t) ~(dst : Location.t
 ;;
 
 let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
-  match (current_frame t).parent with
+  (* We search from the parent of the current *physical* frame rather than the current
+     frame, because with inlined frames the current frame's parent may be another inlined
+     frame rather than the logical parent in the call tree. [inlined_count] tracks how many
+     inlined frames sit between the current leaf and the physical frame so we can include
+     them in the return distance. *)
+  let current = current_frame t in
+  let current_physical = Frame.find_first_non_inlined current in
+  let inlined_count =
+    match Frame.find_ancestor current ~ancestor:current_physical with
+    | This n -> n
+    | Null -> assert false
+  in
+  match current_physical.parent with
   | Null ->
     (* We are returning into something we did not see the call for. This can happen if
        there's a series of calls like [fn1 -> fn2 -> fn3] and we started tracing during
        the execution of [fn2], then we see a return into [fn1]. *)
     Nonempty_vec.push_back
       t.callstacks
-      #{ time; leaf = replace_root t dst; control_flow = Return { distance = 0 } };
+      #{ time
+       ; leaf = replace_root t dst
+       ; control_flow = Return { distance = inlined_count }
+       };
     resolve_inlined_after_return t time ~dst
   | This parent_frame ->
-    (* We start our search for [dst] from the parent of the current frame because
+    (* We start our search for [dst] from the parent of the current physical frame because
        otherwise you'd incorrectly handle non-tail recursion, and because returning to the
        current frame is impossible anyway. We add 1 to [distance] in the [control_flow] to
-       account for the one extra frame implicitly traversed by doing this. *)
+       account for the physical frame, plus [inlined_count] for any inlined frames above
+       it. *)
     (match Frame.find parent_frame dst.symbol with
      | #(This dst_frame, ~distance) ->
        (* 99% of the time [distance] should be 0, indicating we are returning to
@@ -419,14 +435,20 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           within their kernel/interrupt stack. *)
        Nonempty_vec.push_back
          t.callstacks
-         #{ time; leaf = dst_frame; control_flow = Return { distance = distance + 1 } };
+         #{ time
+          ; leaf = dst_frame
+          ; control_flow = Return { distance = distance + 1 + inlined_count }
+          };
        resolve_inlined_after_return t time ~dst
      | #(Null, ~distance:0) ->
        (* Our [parent_frame] is the sentinel. We treat this identically to the [Null] case
           in the outer match, for the same reasons stated in the comment there. *)
        Nonempty_vec.push_back
          t.callstacks
-         #{ time; leaf = replace_root t dst; control_flow = Return { distance = 0 + 1 } };
+         #{ time
+          ; leaf = replace_root t dst
+          ; control_flow = Return { distance = 0 + 1 + inlined_count }
+          };
        resolve_inlined_after_return t time ~dst
      | #(Null, ~distance:_) ->
        (* Something is probably wrong if we ever make it to this case, where the state
