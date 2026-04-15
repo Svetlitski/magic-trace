@@ -28,29 +28,58 @@ module Response = struct
   let inlined_frames t = Slice.create t ~pos:1 ~len:(Iarray.length t - 1)
 end
 
-external symbolize
-  :  executable:Interned_string.t
-  -> addr:i64
-  -> Response.t or_null
-  = "magic_trace_llvm_symbolize_address_bytecode" "magic_trace_llvm_symbolize_address"
+module Llvm_symbolizer = struct
+  type t = Iptr.t
 
-let (symbolization_cache : (Request.t, Response.t Uopt.t) Hashtbl.t) =
-  (* Use templated [@kind value value_or_null] once that's available instead of converting to [Uopt.t] *)
-  Hashtbl.create (module Request)
+  external create
+    :  unit
+    -> t
+    = "caml_no_bytecode_impl" "magic_trace_llvm_symbolizer_create"
+  [@@noalloc]
+
+  external destroy
+    :  t
+    -> unit
+    = "caml_no_bytecode_impl" "magic_trace_llvm_symbolizer_destroy"
+  [@@noalloc]
+
+  external symbolize
+    :  t
+    -> executable:Interned_string.t
+    -> addr:i64
+    -> Response.t or_null
+    = "caml_no_bytecode_impl" "magic_trace_llvm_symbolize_address"
+end
+
+type t =
+  { symbolization_cache : (Request.t, Response.t Uopt.t) Hashtbl.t
+  ; response_cache : Response.t Hash_set.t
+  ; llvm_symbolizer : Llvm_symbolizer.t
+  }
+
+let finalize (t : t) = Llvm_symbolizer.destroy t.llvm_symbolizer
+
+let create () =
+  let t =
+    { symbolization_cache = Hashtbl.create (module Request)
+    ; response_cache = Hash_set.create (module Response)
+    ; llvm_symbolizer = Llvm_symbolizer.create ()
+    }
+  in
+  Gc.Expert.add_finalizer_exn t finalize;
+  t
 ;;
 
-let response_cache = Hash_set.create (module Response)
-
-let symbolize ~executable ~addr =
+let symbolize t ~executable ~addr =
   let addr = I64.of_int64 addr in
   let result =
     Hashtbl.find_or_add
-      symbolization_cache
+      t.symbolization_cache
       { addr; executable }
       ~default:(stack_ fun () ->
-        match symbolize ~executable ~addr with
+        match Llvm_symbolizer.symbolize t.llvm_symbolizer ~executable ~addr with
         | Null -> Uopt.none
-        | This response -> Uopt.some (Hash_set.get_or_add response_cache response))
+        | This response -> Uopt.some (Hash_set.get_or_add t.response_cache response))
   in
   Bool.select (Uopt.is_some result) (This (Uopt.unsafe_value result)) Null
 ;;

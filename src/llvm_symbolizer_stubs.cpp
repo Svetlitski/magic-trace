@@ -2,7 +2,6 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
-#include <unordered_map>
 
 #include "caml/alloc.h"
 #include "caml/memory.h"
@@ -16,8 +15,6 @@ llvm::symbolize::LLVMSymbolizer::Options make_symbolizer_options() {
   opts.DefaultArch = "x86_64";
   return opts;
 }
-llvm::symbolize::LLVMSymbolizer symbolizer{make_symbolizer_options()};
-
 value ocaml_string_of_cpp_string(std::string_view string) {
   return caml_alloc_initialized_string(string.length(), string.data());
 }
@@ -25,15 +22,25 @@ value ocaml_string_of_cpp_string(std::string_view string) {
 
 
 extern "C" {
+CAMLprim llvm::symbolize::LLVMSymbolizer* __attribute__((used, retain))
+magic_trace_llvm_symbolizer_create() {
+    return new llvm::symbolize::LLVMSymbolizer(make_symbolizer_options());
+}
+
+CAMLprim void __attribute__((used, retain))
+magic_trace_llvm_symbolizer_destroy(llvm::symbolize::LLVMSymbolizer* symbolizer) {
+    delete symbolizer;
+}
+
 CAMLprim value __attribute__((used, retain))
-magic_trace_llvm_symbolize_address(value v_executable_file, uintptr_t address) {
+magic_trace_llvm_symbolize_address(llvm::symbolize::LLVMSymbolizer* symbolizer, value v_executable_file, uintptr_t address) {
   CAMLparam1(v_executable_file);
   CAMLlocal2(inlined_frames, demangled_name);
   std::string_view executable_file{String_val(v_executable_file),
                                    caml_string_length(v_executable_file)};
   llvm::object::SectionedAddress sectioned_address{
       address, llvm::object::SectionedAddress::UndefSection};
-  auto result = symbolizer.symbolizeInlinedCode(executable_file, sectioned_address);
+  auto result = symbolizer->symbolizeInlinedCode(executable_file, sectioned_address);
   if (auto _ = result.takeError()) {
     CAMLreturn(NULL);
   }
@@ -54,10 +61,5 @@ magic_trace_llvm_symbolize_address(value v_executable_file, uintptr_t address) {
     caml_modify(&Field(inlined_frames, num_frames - 1 - i), demangled_name);
   }
   CAMLreturn(inlined_frames);
-}
-
-CAMLprim value __attribute__((used, retain))
-magic_trace_llvm_symbolize_address_bytecode(value v_executable_file, value v_address) {
-  return magic_trace_llvm_symbolize_address(v_executable_file, Field(v_address, 0));
 }
 }

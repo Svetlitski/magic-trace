@@ -42,5 +42,13 @@ module Response : sig
   val inlined_frames : t -> Info.t Slice.t
 end
 
+type t
+
+val create : unit -> t
+
 (** Symbolizes the given address. Returns [Null] if the address is unrecognized. *)
-val symbolize : executable:Interned_string.t -> addr:Int64.t @ local -> Response.t or_null
+val symbolize
+  :  t
+  -> executable:Interned_string.t
+  -> addr:Int64.t @ local
+  -> Response.t or_null

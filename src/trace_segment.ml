@@ -325,6 +325,7 @@ type t =
          [leaf].
       2. A callstack with [control_flow = Return { distance }] **exits** [distance]
          frames, starting from the [leaf] of the callstack immediately preceding it. *)
+  ; symbolizer : Symbolizer.t
   ; ocaml_exception_info : Ocaml_exception_info.t or_null
   ; exception_handlers : Frame.t Vec.t
   (** The currently active OCaml exception handlers. This is used to determine which frame
@@ -349,6 +350,7 @@ let create ocaml_exception_info =
           ; control_flow = Return { distance = 0 }
           }
          : Callstack.t)
+  ; symbolizer = Symbolizer.create ()
   ; exception_handlers = Vec.create ()
   ; ocaml_exception_info = Or_null.of_option ocaml_exception_info
   ; last_known_location : Location.t =
@@ -428,8 +430,8 @@ let diff_inlined_frames'
   done
 ;;
 
-let symbolize_inlined_frames ~dso ~addr =
-  match Symbolizer.symbolize ~executable:dso ~addr with
+let symbolize_inlined_frames t ~dso ~addr =
+  match Symbolizer.symbolize t.symbolizer ~executable:dso ~addr with
   | Null -> Slice.empty
   | This result -> Symbolizer.Response.inlined_frames result
 ;;
@@ -443,14 +445,15 @@ let diff_inlined_frames (t : t) time ~dso ~(before : int64) ~(after : int64) =
     t
     time
     ~dso
-    ~before:(symbolize_inlined_frames ~dso ~addr:before)
-    ~after:(symbolize_inlined_frames ~dso ~addr:after)
+    ~before:(symbolize_inlined_frames t ~dso ~addr:before)
+    ~after:(symbolize_inlined_frames t ~dso ~addr:after)
 ;;
 
 let append_inlined_frames t time =
   let #(current_physical_frame, ~distance:_) = current_physical_frame t in
   match
     Symbolizer.symbolize
+      t.symbolizer
       ~executable:current_physical_frame.location.dso
       ~addr:current_physical_frame.instruction_pointer
   with
@@ -579,7 +582,7 @@ let return_to_unseen (t : t) (time : Timestamp.t) ~(dst : Location.t) ~(distance
      see reflected as roots of the whole trace corresponds to the code as of the [call]
      instruction we are returning from, *not* whatever comes immediately after it. *)
   let addr = Int64.O.(dst.instruction_pointer - 1L) in
-  let inlined_frames = symbolize_inlined_frames ~dso:dst.dso ~addr in
+  let inlined_frames = symbolize_inlined_frames t ~dso:dst.dso ~addr in
   let mutable inlined_leaf = Null in
   for i = Slice.length inlined_frames - 1 downto 0 do
     let%tydi { demangled_name } = Slice.unsafe_get inlined_frames i in
@@ -834,6 +837,7 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
      then (
        let mutable prev_inlined_frames =
          symbolize_inlined_frames
+           t
            ~dso:t.last_known_location.dso
            ~addr:t.last_known_location.instruction_pointer
        in
@@ -843,7 +847,7 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
        (* There are no [i64] for-loops yet :( *)
        while I64.O.(addr <= src_addr) do
          let addr_inlined_frames =
-           symbolize_inlined_frames ~dso:src.dso ~addr:(I64.box addr)
+           symbolize_inlined_frames t ~dso:src.dso ~addr:(I64.box addr)
          in
          diff_inlined_frames'
            t
@@ -928,6 +932,7 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
       actual_inlined_frames := Symbol.display_name symbol :: !actual_inlined_frames);
     let expected_inlined_frames =
       symbolize_inlined_frames
+        t
         ~dso:t.last_known_location.dso
         ~addr:t.last_known_location.instruction_pointer
       |> Slice.map_to_list ~f:(fun { demangled_name; _ } -> demangled_name ^ " (inlined)")
