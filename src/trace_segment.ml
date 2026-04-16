@@ -50,9 +50,47 @@ module Frame : sig
       the [Sentinel.t]. *)
   val iter_n : t -> int -> f:local_ (t -> unit) -> unit
 
-  (** Iterate the entire callstack from root-to-leaf. Note that this is *not*
-      tail-recursive, given that frames form a singly-linked list from leaf-to-root. *)
-  val iter_rev : t -> f:local_ (t -> unit) -> unit
+  (** Like [iter_n], this iterates from **leaf-to-root**. The "rev" here signifies that
+      the callback [f] is invoked in the reverse order of iteration (i.e. root-to-leaf).
+      Note that this is *not* tail-recursive, given that frames form a singly-linked list
+      from leaf-to-root. *)
+  val iter_n_rev : t -> int -> f:local_ (t -> unit) -> unit
+
+  (* If you're still confused between [iter_n] and [iter_n_rev], here's a small example:
+
+      {v
+            ┌────────┬────────┐
+     root:  │  fn1   │  Null  │
+            └────────┴────────┘
+                         ▲
+                         │
+            ┌────────┬────────┐
+            │  fn2   │        │
+            └────────┴────────┘
+                         ▲
+                         │
+            ┌────────┬────────┐
+            │  fn3   │        │
+            └────────┴────────┘
+                         ▲
+                         │
+            ┌────────┬────────┐
+            │  fn4   │        │
+            └────────┴────────┘
+                         ▲
+                         │
+            ┌────────┬────────┐
+     leaf:  │  fn5   │        │
+            └────────┴────────┘
+      v}
+
+      {[
+        Frame.iter_n leaf 3 ~f:(fun frame -> printf "%s; " (Symbol.display_name frame.location.symbol));
+        > fn5; fn4; fn3
+        Frame.iter_n_rev leaf 3 ~f:(fun frame -> printf "%s; " (Symbol.display_name frame.location.symbol));
+        > fn3; fn4; fn5
+      ]}
+  *)
 
   val find_ancestor
     :  t
@@ -151,11 +189,11 @@ end = struct
       iter_n parent (n - 1) ~f
   ;;
 
-  let rec iter_rev t ~f =
-    match t with
-    | { parent = Null; _ } -> ()
-    | { parent = This parent; _ } ->
-      iter_rev parent ~f;
+  let rec iter_n_rev t n ~f =
+    match t, n with
+    | { parent = Null; _ }, _ | _, 0 -> ()
+    | { parent = This parent; _ }, n ->
+      iter_n_rev parent (n - 1) ~f;
       f t
   ;;
 
@@ -258,42 +296,10 @@ end = struct
   end
 end
 
-(* TODO I realized embarrassingly late that [Control_flow.t] isn't sufficiently expressive
-   to accurately describe things with the introduction of inlined frames; I think we should
-   replace this variant entirely with an unboxed pair [#{ frames_exited : int; frames_entered : int }];
-   The problem with our current approach of adding a new [control_flow = Call] to [callstacks] for each
-   inlined frame is that it make our time-smearing logic wrong in many cases. For example, consider a
-   tail-call from physical function [fn1] to [fn2] at time [T], where the entry-point in [fn2] has an
-   inlined callstack of [fn2 -> fn3 -> fn4], and the next timestamp we receive is at [T + K].
-   Smearing should *not* affect the [fn2 -> fn3 -> fn4] callstack; every function in that callstack was
-   entered *simultaneously*, so what you should see in Perfetto is:
-┌─────────────────────────┐┌─────────────────────────┐
-│           fn1           ││           fn2           │
-└─────────────────────────┘├─────────────────────────┤
-                           │           fn3           │
-                           ├─────────────────────────┤
-                           │           fn4           │
-                           └─────────────────────────┘
-
-  Instead right now we make the mistake of producing individual [Call]s for each inlined frame, and
-  **treating each [Call] as consuming time**, so you actually see:
-┌─────────────────────────┐┌─────────────────────────┐
-│           fn1           ││           fn2           │
-└─────────────────────────┘└────────┬────────────────┤
-                                    │      fn3       │
-                                    └────────┬───────┤
-                                             │  fn4  │
-                                             └───────┘
-  The proposed [#{ frames_exited : int; frames_entered : int}] encoding solves this by allowing us to express the difference between
-  many frames entered *simultaneously* (e.g. the above example, encoded by [#{ frames_exited = 1; frames_entered = 3}]), versus
-  frames entered *over time* (e.g. the implied straightline-execution between two events, where you do want numerous
-  entries added to your [callstacks] so that they can be smeared later). This also fixes the related issue where right now we can't
-  differentiate between returning to the parent function and then making a call into a new child function, vs. making a tail-call from one
-  child function to another child function.
-*)
 module Control_flow = struct
   type t =
-    | Call
+    | Call of { depth : int }
+    (** [depth] indicates how many new frames were introduced. *)
     | Return of { distance : int }
     (** [distance] indicates how many frames this return pops off of the callstack.
         [distance = 1] is the usual case of returning from the current frame to its
@@ -320,9 +326,9 @@ type t =
       the following invariants in order for [callstacks] to be correctly processed during
       [write_trace]:
 
-      1. A callstack with [control_flow = Call] introduces **exactly** one new frame which
-         was not present in the callstack immediately preceding it. This new frame is its
-         [leaf].
+      1. A callstack with [control_flow = Call { depth }] introduces [depth] new frames
+         which were not present in the callstack immediately preceding it. These new
+         frames are the first [depth] frames starting from this callstack's [leaf].
       2. A callstack with [control_flow = Return { distance }] **exits** [distance]
          frames, starting from the [leaf] of the callstack immediately preceding it. *)
   ; symbolizer : Symbolizer.t
@@ -423,11 +429,14 @@ let diff_inlined_frames'
         ~parent
         ~kind:Inlined
     in
+    parent <- inlined_frame
+  done;
+  let frames_created = Slice.length after - first_different_index in
+  if frames_created > 0
+  then
     Nonempty_vec.push_back
       t.callstacks
-      #{ time; leaf = inlined_frame; control_flow = Call };
-    parent <- inlined_frame
-  done
+      #{ time; leaf = parent; control_flow = Call { depth = frames_created } }
 ;;
 
 let symbolize_inlined_frames t ~dso ~addr =
@@ -449,38 +458,48 @@ let diff_inlined_frames (t : t) time ~dso ~(before : int64) ~(after : int64) =
     ~after:(symbolize_inlined_frames t ~dso ~addr:after)
 ;;
 
-let append_inlined_frames t time =
-  let #(current_physical_frame, ~distance:_) = current_physical_frame t in
+let append_inlined_frames t time ~(physical_frame : Frame.t) ~physical_frame_is_new =
+  assert (phys_equal physical_frame.kind Physical);
   match
     Symbolizer.symbolize
       t.symbolizer
-      ~executable:current_physical_frame.location.dso
-      ~addr:current_physical_frame.instruction_pointer
+      ~executable:physical_frame.location.dso
+      ~addr:physical_frame.instruction_pointer
   with
-  | Null -> ()
+  | Null ->
+    if physical_frame_is_new
+    then
+      Nonempty_vec.push_back
+        t.callstacks
+        #{ time; leaf = physical_frame; control_flow = Call { depth = 1 } }
   | This response ->
-    let parent = stack_ (ref current_physical_frame) in
-    Slice.iter
-      (Symbolizer.Response.inlined_frames response)
-      ~f:(stack_ fun { demangled_name; _ } ->
-        let inlined_leaf_frame =
-          Frame.create
-            ~kind:Inlined
-            (* TODO Creating dummy locations for inlined frames like this is gross, but
+    let parent = stack_ (ref physical_frame) in
+    let inlined_frames = Symbolizer.Response.inlined_frames response in
+    Slice.iter inlined_frames ~f:(stack_ fun { demangled_name; _ } ->
+      let inlined_leaf_frame =
+        Frame.create
+          ~kind:Inlined
+          (* TODO Creating dummy locations for inlined frames like this is gross, but
                filling in the remaining fields also isn't useful. Not really sure what to
                do about this. *)
-            { symbol = From_perf (demangled_name ^ " (inlined)")
-            ; symbol_offset = 0
-            ; instruction_pointer = 0L
-            ; dso = Interned_string.empty
-            }
-            ~parent:!parent
-        in
-        Nonempty_vec.push_back
-          t.callstacks
-          #{ time; leaf = inlined_leaf_frame; control_flow = Call };
-        parent := inlined_leaf_frame)
-    [@nontail]
+          { symbol = From_perf (demangled_name ^ " (inlined)")
+          ; symbol_offset = 0
+          ; instruction_pointer = 0L
+          ; dso = Interned_string.empty
+          }
+          ~parent:!parent
+      in
+      parent := inlined_leaf_frame);
+    if physical_frame_is_new || Slice.length inlined_frames > 0
+    then
+      Nonempty_vec.push_back
+        t.callstacks
+        #{ time
+         ; leaf = !parent
+         ; control_flow =
+             Call
+               { depth = Bool.to_int physical_frame_is_new + Slice.length inlined_frames }
+         }
 ;;
 
 (** This is intended to mark code we hope is *unreachable*, not merely uncommon. Hopefully
@@ -512,13 +531,8 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
       ()
     | #(Null, ~physical_distance:0, ..) ->
       (* I would only ever expect this to occur at the very beginning of a trace. *)
-      Nonempty_vec.push_back
-        t.callstacks
-        #{ time
-         ; leaf = Frame.create src ~parent:(t.root :> Frame.t) ~kind:Physical
-         ; control_flow = Call
-         };
-      append_inlined_frames t time
+      let src_frame = Frame.create src ~parent:(t.root :> Frame.t) ~kind:Physical in
+      append_inlined_frames t time ~physical_frame:src_frame ~physical_frame_is_new:true
     | #(This src_frame, ~physical_distance:_, ~distance, ~leaf_of_inlined_stack) ->
       log_unexpected_case
         [%message "call [src] exists, but is higher up the callstack." (src : Location.t)];
@@ -558,20 +572,14 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
          better odds of resynchronizing with the event stream, since now we can easily
          handle a later return event to [src], [dst], or even both. *)
       let src_frame = Frame.create src ~parent:(current_frame t) ~kind:Physical in
-      Nonempty_vec.push_back t.callstacks #{ time; leaf = src_frame; control_flow = Call };
-      append_inlined_frames t time
+      append_inlined_frames t time ~physical_frame:src_frame ~physical_frame_is_new:true
   in
   let #(src_frame, ~distance:_) = current_physical_frame t in
   assert (not (Or_null.is_null src_frame.parent));
   Frame.set_instruction_pointer src_frame src.instruction_pointer;
   (* Then create the new frame for [dst]. *)
-  Nonempty_vec.push_back
-    t.callstacks
-    #{ time
-     ; leaf = Frame.create dst ~parent:(current_frame t) ~kind:Physical
-     ; control_flow = Call
-     };
-  append_inlined_frames t time
+  let dst_frame = Frame.create dst ~parent:(current_frame t) ~kind:Physical in
+  append_inlined_frames t time ~physical_frame:dst_frame ~physical_frame_is_new:true
 ;;
 
 (** We are returning into something we did not see the call for. This can happen if
@@ -635,7 +643,11 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
              ; leaf = dst_frame
              ; control_flow = Return { distance = distance + distance_to_parent_frame }
              };
-          append_inlined_frames t time
+          append_inlined_frames
+            t
+            time
+            ~physical_frame:dst_frame
+            ~physical_frame_is_new:false
         | #(This inlined_leaf, inlined_leaf_distance) ->
           Nonempty_vec.push_back
             t.callstacks
@@ -667,13 +679,8 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           ; leaf = parent_frame
           ; control_flow = Return { distance = distance_to_parent_frame }
           };
-       Nonempty_vec.push_back
-         t.callstacks
-         #{ time
-          ; leaf = Frame.create dst ~parent:parent_frame ~kind:Physical
-          ; control_flow = Call
-          };
-       append_inlined_frames t time)
+       let dst_frame = Frame.create dst ~parent:parent_frame ~kind:Physical in
+       append_inlined_frames t time ~physical_frame:dst_frame ~physical_frame_is_new:true)
 ;;
 
 let handle_jump (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Location.t) =
@@ -694,22 +701,15 @@ let handle_jump (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
       (* This is probably a non-recursive tail-call, but we don't know anything
          about the previous frame, so we treat this is a [Call] because we only
          want to emit a frame-enter while writing out the trace. *)
-      Nonempty_vec.push_back
-        t.callstacks
-        #{ time
-         ; leaf = Frame.create dst ~parent:(t.root :> Frame.t) ~kind:Physical
-         ; control_flow = Call
-         };
-      append_inlined_frames t time
+      let dst_frame = Frame.create dst ~parent:(t.root :> Frame.t) ~kind:Physical in
+      append_inlined_frames t time ~physical_frame:dst_frame ~physical_frame_is_new:true
     | This parent ->
       (* This is probably a non-recursive tail-call. *)
       Nonempty_vec.push_back
         t.callstacks
         #{ time; leaf = parent; control_flow = Return { distance = distance + 1 } };
-      Nonempty_vec.push_back
-        t.callstacks
-        #{ time; leaf = Frame.create dst ~parent ~kind:Physical; control_flow = Call };
-      append_inlined_frames t time)
+      let dst_frame = Frame.create dst ~parent ~kind:Physical in
+      append_inlined_frames t time ~physical_frame:dst_frame ~physical_frame_is_new:true)
 ;;
 
 let is_ocaml_exception_handler t ~(dst : Location.t) =
@@ -733,7 +733,11 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           Nonempty_vec.push_back
             t.callstacks
             #{ time; leaf = dst_frame; control_flow = Return { distance } };
-          append_inlined_frames t time
+          append_inlined_frames
+            t
+            time
+            ~physical_frame:dst_frame
+            ~physical_frame_is_new:false
         | #(This inlined_leaf, inlined_leaf_distance) ->
           Nonempty_vec.push_back
             t.callstacks
@@ -775,7 +779,13 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
        (* Unlike [handle_return] we do *not* make the inlined frames at [dst] (or [dst.instruction_pointer - 1])
           the parents of the existing frames. The rationale is that unlike [handle_return], we have no idea
           where we might've been within the frame for [dst] that we just inferred. *)
-       append_inlined_frames t time
+       append_inlined_frames
+         t
+         time
+         ~physical_frame:dst_frame
+           (* This is subtle; Yes the frame is new, but we *don't* want to reflect that in a
+              [Call], because discovered roots are handled separately. *)
+         ~physical_frame_is_new:false
      | #(This dst_frame, ~distance, ~leaf_of_inlined_stack, ..) ->
        log_unexpected_case
          [%message
@@ -788,7 +798,11 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           Nonempty_vec.push_back
             t.callstacks
             #{ time; leaf = dst_frame; control_flow = Return { distance } };
-          append_inlined_frames t time
+          append_inlined_frames
+            t
+            time
+            ~physical_frame:dst_frame
+            ~physical_frame_is_new:false
         | #(This inlined_leaf, inlined_leaf_distance) ->
           Nonempty_vec.push_back
             t.callstacks
@@ -1063,7 +1077,7 @@ let smear_times (callstacks : Callstack.t Nonempty_vec.t) =
      time substantially reduces the frequency where we need to use zero-duration events.
      In general the traces are easier to read if returns aren't counted as consuming time. *)
   let[@inline always] consumes_time : Callstack.t -> bool = function
-    | #{ control_flow = Call; _ } -> true
+    | #{ control_flow = Call _; _ } -> true
     | _ -> false
   in
   let len = Nonempty_vec.length callstacks in
@@ -1132,13 +1146,17 @@ let write_trace
        entering any root frames that we discovered by returning into them (i.e. the places
        where we call [replace_root]). *)
     let%tydi #{ leaf; time; _ } = Nonempty_vec.first t.callstacks in
-    Frame.iter_rev leaf ~f:(stack_ fun frame -> Writer.emit_frame_enter writer time frame));
+    Frame.iter_n_rev leaf Int.max_value ~f:(stack_ fun frame ->
+      Writer.emit_frame_enter writer time frame));
   Nonempty_vec.iter_pairs
     t.callstacks
     ~f:(stack_ fun (#(prev, curr) : #(Callstack.t * Callstack.t)) ->
       let time = curr.#time in
       match curr.#control_flow with
-      | Call -> Writer.emit_frame_enter writer time curr.#leaf
+      | Call { depth } ->
+        Frame.iter_n_rev curr.#leaf depth ~f:(stack_ fun frame ->
+          Writer.emit_frame_enter writer time frame)
+        [@nontail]
       | Return { distance } ->
         Frame.iter_n prev.#leaf distance ~f:(stack_ fun frame ->
           Writer.emit_frame_exit writer time frame)
@@ -1220,7 +1238,7 @@ module%test _ = struct
     ;;
 
     let create_callstacks (times : int list) : Callstack.t Nonempty_vec.t =
-      List.map ~f:(fun time -> time, Control_flow.Call) times
+      List.map ~f:(fun time -> time, Control_flow.Call { depth = 1 }) times
       |> create_callstacks_with_control_flow
     ;;
 
@@ -1288,10 +1306,10 @@ module%test _ = struct
       let callstacks =
         create_callstacks_with_control_flow
           [ 0, Return { distance = 1 }
-          ; 0, Call
+          ; 0, Call { depth = 1 }
           ; 0, Return { distance = 1 }
-          ; 0, Call
-          ; 100, Call
+          ; 0, Call { depth = 1 }
+          ; 100, Call { depth = 1 }
           ]
       in
       print_times callstacks;
@@ -1304,7 +1322,11 @@ module%test _ = struct
     let%expect_test "[smear_times] first event is a Call" =
       let callstacks =
         create_callstacks_with_control_flow
-          [ 0, Call; 0, Return { distance = 1 }; 0, Call; 90, Call ]
+          [ 0, Call { depth = 1 }
+          ; 0, Return { distance = 1 }
+          ; 0, Call { depth = 1 }
+          ; 90, Call { depth = 1 }
+          ]
       in
       print_times callstacks;
       [%expect {|  0  0  0 90 |}];
@@ -1319,7 +1341,7 @@ module%test _ = struct
           [ 0, Return { distance = 1 }
           ; 0, Return { distance = 1 }
           ; 0, Return { distance = 1 }
-          ; 90, Call
+          ; 90, Call { depth = 1 }
           ]
       in
       print_times callstacks;
