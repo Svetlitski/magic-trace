@@ -968,10 +968,19 @@ module Writer : sig
 
   val emit_frame_enter : 'thread t @ local -> Timestamp.t -> Frame.t -> unit
   val emit_frame_exit : 'thread t @ local -> Timestamp.t -> Frame.t -> unit
+  val flush : 'thread t @ local -> unit
 end = struct
+  module Duration = struct
+    type t =
+      { location : Location.t
+      ; start_time : Timestamp.t
+      ; mutable end_time : Timestamp.t or_null
+      }
+  end
+
   type 'thread t =
     { mutable last_time : Timestamp.t @@ global
-    ; active_frames : Symbol.t Vec.t @@ global
+    ; active_frames : (Symbol.t * index:int) Vec.t @@ global
     (** Strictly speaking maintaining [last_time] and [active_frames] is not necessary
         assuming the rest of the code is written correctly, but not checking our
         invariants makes it *much* harder to figure out where things go wrong, because you
@@ -983,7 +992,15 @@ end = struct
     ; write_duration_end :
         args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit
       @@ global
+    ; write_duration_complete :
+        args:Tracing.Trace.Arg.t list
+        -> name:string
+        -> start_time:Time_ns.Span.t
+        -> end_time:Time_ns.Span.t
+        -> unit
+      @@ global
     ; debug_info : Elf.Addr_table.t @@ global
+    ; trace_buffer : Duration.t Vec.t @@ global
     }
 
   let create
@@ -1000,7 +1017,16 @@ end = struct
           (fun ~args ~name ~time -> T.write_duration_begin ~args ~thread ~name ~time)
       ; write_duration_end =
           (fun ~args ~name ~time -> T.write_duration_end ~args ~thread ~name ~time)
+      ; write_duration_complete =
+          (fun ~args ~name ~start_time ~end_time ->
+            T.write_duration_complete
+              ~args
+              ~thread
+              ~name
+              ~time:start_time
+              ~time_end:end_time)
       ; debug_info
+      ; trace_buffer = Vec.create ()
       }
   ;;
 
@@ -1048,24 +1074,46 @@ end = struct
     let location = frame.location in
     assert (Timestamp.( >= ) time t.last_time);
     t.last_time <- time;
-    Vec.push_back t.active_frames location.symbol;
+    let index = Vec.length t.trace_buffer in
+    Vec.push_back t.active_frames (location.symbol, ~index);
     if debug then eprintf "Enter %s\n" (Symbol.display_name location.symbol);
-    t.write_duration_begin
+    Vec.push_back t.trace_buffer { location; start_time = time; end_time = Null };
+    (*
+       t.write_duration_begin
       ~args:(location_args t.debug_info location)
       ~name:(Symbol.display_name location.symbol)
       ~time:(time :> Time_ns.Span.t)
+    *)
+    ()
   ;;
 
   let emit_frame_exit (t : _ t) (time : Timestamp.t) (frame : Frame.t) =
     let location = frame.location in
     assert (Timestamp.( >= ) time t.last_time);
     t.last_time <- time;
-    [%test_result: Symbol.t] ~expect:(Vec.pop_back_exn t.active_frames) location.symbol;
+    let expected_symbol, ~index = Vec.pop_back_exn t.active_frames in
+    [%test_result: Symbol.t] ~expect:expected_symbol location.symbol;
     if debug then eprintf "Exit %s\n" (Symbol.display_name location.symbol);
-    t.write_duration_end
+    let duration = Vec.get t.trace_buffer index in
+    duration.end_time <- This time;
+    (*
+       t.write_duration_end
       ~args:[]
       ~name:(Symbol.display_name location.symbol)
       ~time:(time :> Time_ns.Span.t)
+    *)
+    ()
+  ;;
+
+  let flush (t : _ t) =
+    Vec.iter t.trace_buffer ~f:(stack_ fun { location; start_time; end_time } ->
+      let end_time = Or_null.value_exn end_time in
+      t.write_duration_complete
+        ~args:(location_args t.debug_info location)
+        ~name:(Symbol.display_name location.symbol)
+        ~start_time:(start_time :> Time_ns.Span.t)
+        ~end_time:(end_time :> Time_ns.Span.t))
+    [@nontail]
   ;;
 end
 
@@ -1167,7 +1215,8 @@ let write_trace
     let last_callstack = Nonempty_vec.last t.callstacks in
     Frame.iter_n last_callstack.#leaf Int.max_value ~f:(stack_ fun frame ->
       Writer.emit_frame_exit writer last_callstack.#time frame)
-    [@nontail])
+    [@nontail]);
+  Writer.flush writer [@nontail]
 ;;
 
 module%test _ = struct
