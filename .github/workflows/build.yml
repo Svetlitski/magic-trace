@@ -29,6 +29,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      # This is necessary to avoid an error of the form 'fatal: detected dubious ownership in repository ...'
       - run: git config --global --add safe.directory $(pwd)
 
       - uses: actions/cache@v5
@@ -38,11 +39,6 @@ jobs:
 
       - name: Use OCaml ${{ matrix.ocaml-version }}
         run: |
-          pwd
-          echo "Contents:"
-          ls
-          echo "Validate that [actions/checkout@v6] worked as expected"
-          git ls-files
           export OPAMYES=1
           export OPAMJOBS=$(($(nproc) + 2))
           echo "OPAMYES=1" >> "$GITHUB_ENV"
@@ -54,7 +50,7 @@ jobs:
 
       - run: opam install . --deps-only --locked --with-test
 
-      # - run: opam exec -- dune build @fmt
+      - run: opam exec -- dune build @fmt
 
       - run: opam exec -- make PROFILE=static
 
