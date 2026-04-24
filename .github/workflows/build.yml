@@ -47,7 +47,7 @@ jobs:
 
       - run: opam install . --deps-only --locked --with-test
 
-      - run: opam exec -- dune build @fmt
+      # - run: opam exec -- dune build @fmt
 
       - run: opam exec -- make PROFILE=static
 

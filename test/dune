@@ -1,5 +1,6 @@
 (library
  (name magic_trace_app_test)
+ (no_dynlink)
  (inline_tests)
  (libraries
   async
