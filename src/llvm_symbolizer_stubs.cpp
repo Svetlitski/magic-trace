@@ -39,12 +39,12 @@ magic_trace_llvm_symbolize_address(llvm::symbolize::LLVMSymbolizer *symbolizer,
       address, llvm::object::SectionedAddress::UndefSection};
   auto result = symbolizer->symbolizeInlinedCode(executable_file, sectioned_address);
   if (auto _ = result.takeError()) {
-    CAMLreturn(NULL);
+    CAMLreturn((value)NULL);
   }
   const auto &frames = result.get();
   const uint32_t num_frames = frames.getNumberOfFrames();
   if (num_frames == 0) {
-    CAMLreturn(NULL);
+    CAMLreturn((value)NULL);
   }
   if (num_frames <= Max_young_wosize) [[likely]] {
     inlined_frames = caml_alloc_small(/*wosize=*/num_frames, /*tag=*/0);
