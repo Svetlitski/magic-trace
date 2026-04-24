@@ -17,6 +17,15 @@ jobs:
     container:
       image: alpine:latest
     steps:
+      # This has to come first because the `actions/*` GitHub Actions require `node`,
+      # which isn't installed by default on this container image.
+      - name: "Install apk packages"
+        run: |
+          apk add --no-cache autoconf bash bubblewrap build-base clang coreutils git libstdc++ \
+            libstdc++-dev libunwind-static linux-headers lld llvm20 llvm20-dev llvm20-static \
+            nodejs opam rsync upx zlib-static zstd-static
+          echo "PATH=/usr/lib/llvm20/bin:$PATH" >> "$GITHUB_ENV"
+
       - name: Checkout code
         uses: actions/checkout@v6
 
@@ -24,13 +33,6 @@ jobs:
         with:
           path: ~/.opam
           key: ${{ matrix.os }}-opam-${{ matrix.ocaml-version }}-1
-
-      - name: "Install apk packages"
-        run: |
-          apk add autoconf bash bubblewrap build-base clang coreutils git libstdc++ \
-            libstdc++-dev libunwind-static linux-headers lld llvm20 llvm20-dev llvm20-static \
-            nodejs opam rsync upx zlib-static zstd-static
-          echo "PATH=/usr/lib/llvm20/bin:$PATH" >> "$GITHUB_ENV"
 
       - name: Use OCaml ${{ matrix.ocaml-version }}
         run: |
