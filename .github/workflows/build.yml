@@ -36,6 +36,8 @@ jobs:
 
       - name: Use OCaml ${{ matrix.ocaml-version }}
         run: |
+          echo "Validate that [actions/checkout@v6] worked as expected"
+          git ls-files
           export OPAMYES=1
           export OPAMJOBS=$(($(nproc) + 2))
           echo "OPAMYES=1" >> "$GITHUB_ENV"
