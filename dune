@@ -1,6 +1,6 @@
 (env
  (static
-  (flags
-   (:standard -cclib -static))))
+  (link_flags
+   (:standard -cclib -static -cclib -no-pie))))
 
 (vendored_dirs vendor)

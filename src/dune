@@ -15,9 +15,9 @@
  (action
   (progn
    (bash
-     "clang++ -std=c++20 -Wall -Wextra -Werror -Wno-unused-parameter -funified-lto -DCAML_NAME_SPACE -I %{ocaml_where} $(llvm-config --cxxflags) -O3 -march=broadwell -mtune=skylake -ffunction-sections -fPIC -flto=thin -c llvm_symbolizer_stubs.cpp")
+    "clang++ -std=c++20 -Wall -Wextra -Werror -Wno-unused-parameter -DCAML_NAME_SPACE -I %{ocaml_where} $(llvm-config --cxxflags) -O3 -march=broadwell -mtune=skylake -ffunction-sections -c llvm_symbolizer_stubs.cpp")
    (bash
-     "ld.lld --gc-sections -static -r -plugin-opt=mcpu=broadwell -plugin-opt=O3 --lto=thin --hash-style=gnu --build-id  --start-lib $(llvm-config --link-static --libfiles Symbolize) --end-lib llvm_symbolizer_stubs.o -o libLLVM.o")
+    "ld.lld --gc-sections -static -r -plugin-opt=mcpu=broadwell -plugin-opt=O3 --hash-style=gnu --build-id --start-lib $(llvm-config --link-static --libfiles Symbolize) --end-lib llvm_symbolizer_stubs.o -o libLLVM.o")
    (run llvm-strip --strip-debug libLLVM.o)
    (run llvm-ar Drcs %{target} libLLVM.o))))
 
@@ -31,9 +31,23 @@
  (foreign_stubs
   (language c)
   (names breakpoint_stubs boot_time_stubs ptrace_stubs))
- (libraries core async core_unix.filename_unix fzf re shell
-   core_unix.sys_unix cohttp cohttp_static_handler core_unix.signal_unix
-   tracing magic_trace owee angstrom expect_test_helpers_core vec)
+ (libraries
+  core
+  async
+  core_unix.filename_unix
+  fzf
+  re
+  shell
+  core_unix.sys_unix
+  cohttp
+  cohttp_static_handler
+  core_unix.signal_unix
+  tracing
+  magic_trace
+  owee
+  angstrom
+  expect_test_helpers_core
+  vec)
  (inline_tests)
  (preprocess
   (pps ppx_jane)))
