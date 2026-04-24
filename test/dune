@@ -1,7 +1,8 @@
 (library
  (name magic_trace_app_test)
  (no_dynlink)
- (inline_tests)
+ (inline_tests
+  (deps sample-targets/ocaml-raise/sample.exe))
  (libraries
   async
   core
