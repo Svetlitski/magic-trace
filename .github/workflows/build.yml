@@ -36,6 +36,9 @@ jobs:
 
       - name: Use OCaml ${{ matrix.ocaml-version }}
         run: |
+          pwd
+          echo "Contents:"
+          ls
           echo "Validate that [actions/checkout@v6] worked as expected"
           git ls-files
           export OPAMYES=1
