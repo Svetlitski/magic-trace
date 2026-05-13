@@ -478,6 +478,14 @@ let append_inlined_frames t time ~(physical_frame : Frame.t) ~physical_frame_is_
       parent := inlined_leaf_frame);
     if physical_frame_is_new || Slice.length inlined_frames > 0
     then
+      (* It's important that a [physical_frame] and all of its inlined children are introduced
+         via a single [Callstack.t] for the sake of [smear_times] treating this correctly.
+         When control-flow proceeds from one address to another, where the destination address
+         corresponds to an inlined chain (e.g. [A -> B -> C]), you should treat all of the
+         functions in the chain as having been entered *simultaneously*.
+
+         Producing exactly one [Callstack.t] accomplishes this; if you instead produced N
+         [Callstack.t]s each of [Call { depth = 1}], time would get smeared between them. *)
       Nonempty_vec.push_back
         t.callstacks
         #{ time
