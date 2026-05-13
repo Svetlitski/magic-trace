@@ -1540,8 +1540,6 @@ module%test _ = struct
     jump ~src:"fn1" ~dst:"fn2";
     return ~src:"fn2" ~dst:"main";
     print_callstacks t;
-    (* TODO Showing a return to [main] and subsequent call into [fn2] is a bug that was
-       introduced when adding support for inlined frames. We need to fix this. *)
     [%expect
       {|
       main                main                main                main                main
