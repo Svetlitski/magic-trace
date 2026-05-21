@@ -92,6 +92,8 @@ module Frame : sig
       ]}
   *)
 
+  (** Find [ancestor] searching from [t]. This searches for *exactly* the [Frame.t]
+      instance [ancestor] (i.e. comparison is performed via pointer equality). *)
   val find_ancestor
     :  t
     -> ancestor:t
