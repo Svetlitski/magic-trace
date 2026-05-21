@@ -712,13 +712,7 @@ let write_trace_segments (type thread) (t : thread inner) =
       ~f:(fun #(trace_segment, ~in_filtered_region) ->
         if in_filtered_region
         then
-          Trace_segment.write_trace
-            trace_segment
-            t.trace
-            thread_info.thread
-            t.debug_info
-            ~enter_initial_callstack:true
-            ~exit_final_callstack:true))
+          Trace_segment.write_trace trace_segment t.trace thread_info.thread t.debug_info))
 ;;
 
 let end_of_trace ?to_time (T t) =

@@ -1091,19 +1091,17 @@ let write_trace
   (trace : (module Trace_writer_intf.S_trace with type thread = thread))
   (thread : thread)
   debug_info
-  ~enter_initial_callstack
-  ~exit_final_callstack
   =
   let writer = Writer.create trace thread debug_info in
   smear_times t.callstacks;
-  if enter_initial_callstack
-  then (
+  let () =
     (* Call [emit_frame_enter] for everything in the initial callstack. This takes care of
        entering any root frames that we discovered by returning into them (i.e. the places
        where we call [replace_root]). *)
     let%tydi #{ leaf; time; _ } = Nonempty_vec.first t.callstacks in
     Frame.iter_n_rev leaf Int.max_value ~f:(stack_ fun frame ->
-      Writer.emit_frame_enter writer time frame));
+      Writer.emit_frame_enter writer time frame)
+  in
   Nonempty_vec.iter_pairs
     t.callstacks
     ~f:(stack_ fun (#(prev, curr) : #(Callstack.t * Callstack.t)) ->
@@ -1117,13 +1115,14 @@ let write_trace
         Frame.iter_n prev.#leaf distance ~f:(stack_ fun frame ->
           Writer.emit_frame_exit writer time frame)
         [@nontail]);
-  if exit_final_callstack
-  then (
+  let () =
     (* Call [emit_frame_exit] for all remaining frames at the end of the segment. *)
     let last_callstack = Nonempty_vec.last t.callstacks in
     Frame.iter_n last_callstack.#leaf Int.max_value ~f:(stack_ fun frame ->
       Writer.emit_frame_exit writer last_callstack.#time frame)
-    [@nontail])
+    [@nontail]
+  in
+  ()
 ;;
 
 module%test _ = struct

@@ -17,8 +17,4 @@ val write_trace
   -> (module Trace_writer_intf.S_trace with type thread = 'thread)
   -> 'thread
   -> Elf.Addr_table.t
-  -> enter_initial_callstack:bool
-       (** Emit a frame-enter for each frame in the *first* callstack of this segment. *)
-  -> exit_final_callstack:bool
-       (** Emit a frame-exit for each frame in the *last* callstack of this segment. *)
   -> unit
