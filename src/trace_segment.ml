@@ -343,7 +343,9 @@ type t =
       In contrast to [callstacks] — which records the entire history of control-flow for
       later examination — [exception_handlers] represents the state **as of the event we
       are currently processing**, and as such is only used during the "ingestion" phase
-      (i.e. while calls are still being made to [add_event]). *)
+      (i.e. while calls are still being made to [add_event]). We maintain the invariant
+      that, after processing an event, every frame in [exception_handlers] should be an
+      ancestor of or equal to [current_physical_frame t]. *)
   ; mutable last_known_location : Location.t
   }
 
@@ -930,21 +932,40 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
          processing this event"
       t.last_known_location.instruction_pointer
       current_physical_frame.instruction_pointer;
-    let actual_inlined_frames = ref [] in
-    Frame.iter_n (current_frame t) distance ~f:(fun { location = { symbol; _ }; _ } ->
-      actual_inlined_frames := Symbol.display_name symbol :: !actual_inlined_frames);
-    let expected_inlined_frames =
-      symbolize_inlined_frames
-        t
-        ~dso:t.last_known_location.dso
-        ~addr:t.last_known_location.instruction_pointer
-      |> Slice.map_to_list ~f:(fun inlined_frame_info ->
-        Symbolizer.Info.display_name inlined_frame_info)
+    let () =
+      let actual_inlined_frames = ref [] in
+      Frame.iter_n
+        (current_frame t)
+        distance
+        ~f:(stack_ fun { location = { symbol; _ }; _ } ->
+          actual_inlined_frames := Symbol.display_name symbol :: !actual_inlined_frames);
+      let expected_inlined_frames =
+        symbolize_inlined_frames
+          t
+          ~dso:t.last_known_location.dso
+          ~addr:t.last_known_location.instruction_pointer
+        |> Slice.map_to_list ~f:(fun inlined_frame_info ->
+          Symbolizer.Info.display_name inlined_frame_info)
+      in
+      [%test_result: string list]
+        ~message:"Inlined frames in callstacks did not match expectation"
+        !actual_inlined_frames
+        ~expect:expected_inlined_frames
     in
-    [%test_result: string list]
-      ~message:"Inlined frames in callstacks did not match expectation"
-      !actual_inlined_frames
-      ~expect:expected_inlined_frames)
+    let mutable frame = current_physical_frame in
+    for i = Vec.length t.exception_handlers - 1 downto 0 do
+      let exception_handler = Vec.unsafe_get t.exception_handlers i in
+      let #(~distance, ~leaf_of_inlined_stack:_) =
+        Frame.find_ancestor frame ~ancestor:exception_handler
+      in
+      [%test_result: bool]
+        ~message:
+          "Expected all [exception_handler] frames to be an ancestor of \
+           [current_physical_frame]"
+        ~expect:false
+        (Or_null.is_null distance);
+      frame <- exception_handler
+    done)
 ;;
 
 module Writer : sig
