@@ -366,7 +366,10 @@ let create ocaml_exception_info =
   ; last_known_location : Location.t =
       { symbol = Unknown
       ; symbol_offset = 0
-      ; instruction_pointer = Int64.max_value
+      ; (* [Ocaml_exception_info.iter_pushtraps_and_poptraps_in_range] does binary search
+           under-the-hood; initializing this to [Int64.max_value] intentionally makes the first
+           call terminate immediately. *)
+        instruction_pointer = Int64.max_value
       ; dso = Null
       }
   }
