@@ -6,8 +6,7 @@ let equal = phys_equal
 let compare t1 t2 = Int.compare (Obj.magic t1) (Obj.magic t2)
 let hash t = Int.hash (Obj.magic t)
 let hash_fold_t hash_state t = Int.hash_fold_t hash_state (Obj.magic t)
-let empty = ""
-let cache = String.Hash_set.of_list [ empty ]
+let cache = String.Hash_set.create ()
 let intern t = Hash_set.get_or_add cache t
 
 let t_of_sexp = function

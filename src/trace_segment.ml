@@ -254,7 +254,7 @@ end = struct
 
            See https://refspecs.linuxbase.org/elf/gabi4+/ch4.strtab.html *)
         symbol = From_perf "\x00_"
-      ; dso = Interned_string.empty
+      ; dso = Null
       }
     ;;
 
@@ -367,7 +367,7 @@ let create ocaml_exception_info =
       { symbol = Unknown
       ; symbol_offset = 0
       ; instruction_pointer = Int64.max_value
-      ; dso = Interned_string.empty
+      ; dso = Null
       }
   }
 ;;
@@ -446,7 +446,7 @@ let diff_inlined_frames (t : t) time ~dso ~(before : int64) ~(after : int64) =
   if Env_vars.check_invariants
   then (
     let #(current_physical_frame, ~distance:_) = current_physical_frame t in
-    [%test_eq: Interned_string.t] current_physical_frame.location.dso dso);
+    [%test_eq: Interned_string.t or_null] current_physical_frame.location.dso dso);
   diff_inlined_frames'
     t
     time
@@ -836,7 +836,7 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
   t.last_event_time <- time;
   (match event with
    | Trace { src; dst; _ } ->
-     if Interned_string.equal t.last_known_location.dso src.dso
+     if Or_null.equal Interned_string.equal t.last_known_location.dso src.dso
         && Int64.( <> ) t.last_known_location.instruction_pointer 0L
         && Int64.( <> ) src.instruction_pointer 0L
      then (
@@ -1163,7 +1163,7 @@ module%test _ = struct
                  { symbol_offset = 0
                  ; instruction_pointer = 0L
                  ; symbol = From_perf leaf_name
-                 ; dso = Interned_string.empty
+                 ; dso = Null
                  }
                ~parent:root
                ~kind:Physical)
@@ -1341,7 +1341,7 @@ module%test _ = struct
         { instruction_pointer = Int64.of_int !ip
         ; symbol_offset = 0
         ; symbol = From_perf name
-        ; dso = Interned_string.empty
+        ; dso = Null
         }
     in
     let call ~src ~dst =

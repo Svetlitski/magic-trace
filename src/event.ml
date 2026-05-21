@@ -29,9 +29,9 @@ module Location = struct
       instruction_pointer : Int64.Hex.t
     ; symbol : Symbol.t
     ; symbol_offset : Int.Hex.t
-    ; dso : Interned_string.t
+    ; dso : Interned_string.t or_null
     }
-  [@@deriving sexp, fields, bin_io]
+  [@@deriving sexp, fields ~getters, bin_io]
 
   module Ignore_symbol = struct
     (* Ignoring symbol strings when serializing to save space. This reduces the size of events file
@@ -43,21 +43,13 @@ module Location = struct
     let to_sexpable { instruction_pointer; _ } = instruction_pointer
 
     let of_sexpable instruction_pointer =
-      { instruction_pointer
-      ; symbol = Symbol.Unknown
-      ; symbol_offset = 0
-      ; dso = Interned_string.empty
-      }
+      { instruction_pointer; symbol = Symbol.Unknown; symbol_offset = 0; dso = Null }
     ;;
 
     let to_binable { instruction_pointer; _ } = instruction_pointer
 
     let of_binable instruction_pointer =
-      { instruction_pointer
-      ; symbol = Symbol.Unknown
-      ; symbol_offset = 0
-      ; dso = Interned_string.empty
-      }
+      { instruction_pointer; symbol = Symbol.Unknown; symbol_offset = 0; dso = Null }
     ;;
 
     let caller_identity =
@@ -71,7 +63,7 @@ module Location = struct
   (* magic-trace has some things that aren't functions but look like they are in the trace
      (like "[untraced]" and "[syscall]") *)
   let locationless symbol =
-    { instruction_pointer = 0L; symbol; symbol_offset = 0; dso = Interned_string.empty }
+    { instruction_pointer = 0L; symbol; symbol_offset = 0; dso = Null }
   ;;
 
   let unknown = locationless Unknown

@@ -27,7 +27,7 @@ module Info = struct
     { symbol = From_perf (display_name t)
     ; symbol_offset = 0
     ; instruction_pointer = 0L
-    ; dso = Interned_string.empty
+    ; dso = Null
     }
   ;;
 end
@@ -84,18 +84,21 @@ let create () =
 ;;
 
 let symbolize t ~executable ~addr =
-  let addr = I64.of_int64 addr in
-  (* LLVM can't symbolize things in the Kernel; checking for this explicitly
+  match executable with
+  | Null -> Null
+  | This executable ->
+    let addr = I64.of_int64 addr in
+    (* LLVM can't symbolize things in the Kernel; checking for this explicitly
      avoids us polluting our cache with many [Null] responses. *)
-  if I64.O.(addr <= #0L)
-  then Null
-  else
-    (Hashtbl.find_or_add [@kind value value_or_null])
-      t.symbolization_cache
-      { addr; executable }
-      ~default:(stack_ fun () ->
-        match Llvm_symbolizer.symbolize t.llvm_symbolizer ~executable ~addr with
-        | Null -> Null
-        | This response -> This (Hash_set.get_or_add t.response_cache response))
-    [@nontail]
+    if I64.O.(addr <= #0L)
+    then Null
+    else
+      (Hashtbl.find_or_add [@kind value value_or_null])
+        t.symbolization_cache
+        { addr; executable }
+        ~default:(stack_ fun () ->
+          match Llvm_symbolizer.symbolize t.llvm_symbolizer ~executable ~addr with
+          | Null -> Null
+          | This response -> This (Hash_set.get_or_add t.response_cache response))
+      [@nontail]
 ;;

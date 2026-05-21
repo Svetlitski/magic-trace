@@ -52,6 +52,6 @@ val create : unit -> t
 (** Symbolizes the given address. Returns [Null] if the address is unrecognized. *)
 val symbolize
   :  t
-  -> executable:Interned_string.t
+  -> executable:Interned_string.t or_null
   -> addr:Int64.t @ local
   -> Response.t or_null

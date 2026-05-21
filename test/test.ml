@@ -41,11 +41,7 @@ end = struct
   let unknown = Symbol.From_perf "unknown"
 
   let loc symbol =
-    { Event.Location.instruction_pointer = 0L
-    ; symbol
-    ; symbol_offset = 0
-    ; dso = Interned_string.empty
-    }
+    { Event.Location.instruction_pointer = 0L; symbol; symbol_offset = 0; dso = Null }
   ;;
 
   let symbol () =
@@ -58,7 +54,7 @@ end = struct
     { instruction_pointer = addr ()
     ; symbol = Option.value symbol ~default:(Symbol.From_perf "")
     ; symbol_offset = offset ()
-    ; dso = Interned_string.empty
+    ; dso = Null
     }
   ;;
 
@@ -66,7 +62,7 @@ end = struct
     { instruction_pointer = 0x900000L
     ; symbol = From_perf "_start"
     ; symbol_offset = 4
-    ; dso = Interned_string.empty
+    ; dso = Null
     }
   ;;
 
