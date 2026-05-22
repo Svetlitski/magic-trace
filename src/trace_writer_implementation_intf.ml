@@ -34,14 +34,6 @@ module type S = sig
     val diff : t -> t -> Time_ns.Span.t
   end
 
-  module Callstack : sig
-    type t =
-      { stack : Event.Location.t Stack.t
-      ; mutable create_time : Mapped_time.t
-      }
-    [@@deriving sexp, bin_io]
-  end
-
   module Event_and_callstack : sig
     type t =
       { event : Event.t
