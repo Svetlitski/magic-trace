@@ -96,6 +96,7 @@ let write_trace_from_events
   ~hits
   ~events
   ~close_result
+  ~(collection_mode : Collection_mode.t)
   ()
   =
   (* Normalize to earliest event = 0 to avoid Perfetto rounding issues *)
@@ -123,9 +124,13 @@ let write_trace_from_events
     Tracing.Trace.Expert.create ~base_time:(Some base_time) writer
   in
   let (module Trace_writer : Trace_writer_implementation_intf.S) =
-    if Env_vars.use_new_trace_writer
-    then (module New_trace_writer)
-    else (module Trace_writer)
+    match collection_mode with
+    (* TODO Add support for [Stacktrace_sampling] to [New_trace_writer]. *)
+    | Stacktrace_sampling _ -> (module Trace_writer)
+    | Intel_processor_trace _ ->
+      if Env_vars.use_new_trace_writer
+      then (module New_trace_writer)
+      else (module Trace_writer)
   in
   let writer =
     match trace with
@@ -290,6 +295,7 @@ module Make_commands (Backend : Backend_intf.S) = struct
             ~hits
             ~events
             ~close_result
+            ~collection_mode
             ()
         in
         return ())

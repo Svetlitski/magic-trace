@@ -177,6 +177,7 @@ let dump_using_file ?range_symbols events =
       ~hits:[]
       ~events:[ events ]
       ~close_result
+      ~collection_mode:(Intel_processor_trace { extra_events = [] })
       ()
   in
   ok_exn or_error;
