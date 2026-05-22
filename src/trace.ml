@@ -230,7 +230,7 @@ module Make_commands (Backend : Backend_intf.S) = struct
     ~trace_scope
     ~debug_print_perf_commands
     ~record_dir
-    ~collection_mode
+    ~(collection_mode : Collection_mode.t)
     { Decode_opts.output_config; decode_opts; print_events }
     =
     Core.eprintf "[ Decoding, this takes a while... ]\n%!";
@@ -244,6 +244,11 @@ module Make_commands (Backend : Backend_intf.S) = struct
       | Sys_error _ -> None
     in
     let decode_events ?filter_same_symbol_jumps () =
+      let filter_same_symbol_jumps =
+        match collection_mode, Env_vars.use_new_trace_writer with
+        | Intel_processor_trace _, true -> Some false
+        | _, _ -> filter_same_symbol_jumps
+      in
       Backend.decode_events
         ?perf_maps
         ?filter_same_symbol_jumps
