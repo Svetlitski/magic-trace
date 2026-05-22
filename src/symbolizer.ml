@@ -16,15 +16,13 @@ module Info = struct
   type t = { demangled_name : string }
   [@@unboxed] [@@deriving equal, compare, hash, sexp_of]
 
-  let display_name { demangled_name } = demangled_name ^ " (inlined)"
-
-  let to_location t : Event.Location.t =
+  let to_location { demangled_name } : Event.Location.t =
     (* TODO Creating dummy locations for inlined frames like this is gross, but
        with inlined frames our traces are already so large we can't really
        afford to add more information until we optimize for trace size, and
        not all of these have valid values anyway (e.g. [symbol_offset] for
        an inlined function call is meaningless). *)
-    { symbol = From_perf (display_name t)
+    { symbol = From_perf demangled_name
     ; symbol_offset = 0
     ; instruction_pointer = 0L
     ; dso = Null

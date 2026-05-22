@@ -947,8 +947,7 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
           t
           ~dso:t.last_known_location.dso
           ~addr:t.last_known_location.instruction_pointer
-        |> Slice.map_to_list ~f:(fun inlined_frame_info ->
-          Symbolizer.Info.display_name inlined_frame_info)
+        |> Slice.map_to_list ~f:(stack_ fun { demangled_name } -> demangled_name)
       in
       [%test_result: string list]
         ~message:"Inlined frames in callstacks did not match expectation"

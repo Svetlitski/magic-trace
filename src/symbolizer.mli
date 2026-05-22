@@ -4,8 +4,6 @@ module Info : sig
   type t = private { demangled_name : string }
   [@@unboxed] [@@deriving equal, compare, hash, sexp_of]
 
-  val display_name : t -> string
-
   (** This is currently a gross hack, to be used solely for inlined frames. *)
   val to_location : t -> Event.Location.t
 end
