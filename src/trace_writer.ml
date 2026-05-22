@@ -186,7 +186,7 @@ let write_duration_begin
   =
   let module T = (val t.trace) in
   if t.in_filtered_region
-  then T.write_duration_begin ~args ~thread ~name ~time:(time :> Time_ns.Span.t)
+  then T.write_duration_begin () ~args ~thread ~name ~time:(time :> Time_ns.Span.t)
 ;;
 
 let write_duration_end
@@ -200,7 +200,7 @@ let write_duration_end
   =
   let module T = (val t.trace) in
   if t.in_filtered_region
-  then T.write_duration_end ~args ~thread ~name ~time:(time :> Time_ns.Span.t)
+  then T.write_duration_end () ~args ~thread ~name ~time:(time :> Time_ns.Span.t)
 ;;
 
 let write_duration_complete

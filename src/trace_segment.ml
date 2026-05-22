@@ -992,10 +992,18 @@ end = struct
         would just end up with a mangled Perfetto trace but the [magic-trace] invocation
         would complete silently and successfully. *)
     ; write_duration_begin :
-        args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit
+        args:Tracing.Trace.Arg.t list
+        -> name:string
+        -> time:Time_ns.Span.t
+        -> category:string
+        -> unit
       @@ global
     ; write_duration_end :
-        args:Tracing.Trace.Arg.t list -> name:string -> time:Time_ns.Span.t -> unit
+        args:Tracing.Trace.Arg.t list
+        -> name:string
+        -> time:Time_ns.Span.t
+        -> category:string
+        -> unit
       @@ global
     ; debug_info : Elf.Addr_table.t @@ global
     }
@@ -1011,9 +1019,11 @@ end = struct
       { last_time = Timestamp.zero
       ; active_frames = Vec.create ()
       ; write_duration_begin =
-          (fun ~args ~name ~time -> T.write_duration_begin ~args ~thread ~name ~time)
+          (fun ~args ~name ~time ~category ->
+            T.write_duration_begin ~args ~thread ~name ~time ~category ())
       ; write_duration_end =
-          (fun ~args ~name ~time -> T.write_duration_end ~args ~thread ~name ~time)
+          (fun ~args ~name ~time ~category ->
+            T.write_duration_end ~args ~thread ~name ~time ~category ())
       ; debug_info
       }
   ;;
@@ -1027,15 +1037,16 @@ end = struct
     (* TODO In the future we can surface more detailed information in [args]
        (e.g. filename, line number, etc.) since LLVM can easily provide it to us,
        but for now we omit it given that the traces are already huge. *)
-    let args : Tracing.Trace.Arg.t list =
+    let #(args, category) : #(Tracing.Trace.Arg.t list * string) =
       match frame.kind with
-      | Inlined -> []
-      | Physical -> [ "address", Pointer location.instruction_pointer ]
+      | Inlined -> #([], "Inlined")
+      | Physical -> #([ "address", Pointer location.instruction_pointer ], "")
     in
     t.write_duration_begin
       ~args
       ~name:(Symbol.display_name location.symbol)
       ~time:(time :> Time_ns.Span.t)
+      ~category
   ;;
 
   let emit_frame_exit (t : _ t) (time : Timestamp.t) (frame : Frame.t) =
@@ -1048,6 +1059,7 @@ end = struct
       ~args:[]
       ~name:(Symbol.display_name location.symbol)
       ~time:(time :> Time_ns.Span.t)
+      ~category:""
   ;;
 end
 

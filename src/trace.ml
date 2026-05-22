@@ -79,8 +79,8 @@ module Null_writer : Trace_writer_intf.S_trace = struct
 
   let allocate_pid ~name:_ = 0
   let allocate_thread ~pid:_ ~name:_ = ()
-  let write_duration_begin ~args:_ ~thread:_ ~name:_ ~time:_ : unit = ()
-  let write_duration_end ~args:_ ~thread:_ ~name:_ ~time:_ : unit = ()
+  let write_duration_begin ?category:_ () ~args:_ ~thread:_ ~name:_ ~time:_ : unit = ()
+  let write_duration_end ?category:_ () ~args:_ ~thread:_ ~name:_ ~time:_ : unit = ()
   let write_duration_complete ~args:_ ~thread:_ ~name:_ ~time:_ ~time_end:_ : unit = ()
   let write_duration_instant ~args:_ ~thread:_ ~name:_ ~time:_ : unit = ()
   let write_counter ~args:_ ~thread:_ ~name:_ ~time:_ : unit = ()

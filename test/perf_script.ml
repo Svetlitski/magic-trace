@@ -24,23 +24,23 @@ let run ?(debug = false) ?events_writer ?ocaml_exception_info ~trace_scope file 
       !next_thread
     ;;
 
-    let write_duration_begin ~args:_ ~thread:_ ~name ~time : unit =
+    let write_duration_begin ?category:_ () ~args:_ ~thread:_ ~name ~time : unit =
       if not String.(name = "branch-misses" || name = "cache-misses")
       then printf "-> %8s BEGIN %s\n" (Time_ns.Span.to_string_hum time) name
     ;;
 
-    let write_duration_end ~args:_ ~thread:_ ~name ~time : unit =
+    let write_duration_end ?category:_ () ~args:_ ~thread:_ ~name ~time : unit =
       if not String.(name = "branch-misses" || name = "cache-misses")
       then printf "-> %8s END   %s\n" (Time_ns.Span.to_string_hum time) name
     ;;
 
     let write_duration_complete ~args ~thread ~name ~time ~time_end : unit =
-      write_duration_begin ~args ~thread ~name ~time;
-      write_duration_end ~args ~thread ~name ~time:time_end
+      write_duration_begin () ~args ~thread ~name ~time;
+      write_duration_end () ~args ~thread ~name ~time:time_end
     ;;
 
     let write_duration_instant ~args ~thread ~name ~time : unit =
-      write_duration_begin ~args ~thread ~name ~time;
+      write_duration_begin () ~args ~thread ~name ~time;
       printf "->          END   %s\n" name
     ;;
 
