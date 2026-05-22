@@ -781,6 +781,38 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
               [Call], because discovered roots are handled separately. *)
          ~physical_frame_is_new:false
      | #(This dst_frame, ~distance, ~leaf_of_inlined_stack, ..) ->
+       (* There are valid (but hopefully rare) ways to reach this case.
+          Take the following code for example:
+          {v
+
+          let rec process_data x n =
+            match n with
+            | 100 -> x
+            | 50 -> (try process_data x (n + 1) with | _ -> process_data x 76)
+            | 75 -> failwith "Raise an exception"
+            | n -> n + process_data (x + n) (n + 1)
+          ;;
+
+          v}
+
+          If the program calls [process_data _ 0], and we start tracing during the execution of
+          [process_data _ 70], then when the program eventually executes [process_data _ 75]
+          and raises an exception, the symbol of the exception target [process_data] will be
+          found in the current callstack, but [t.exception_handlers] will be **empty** because
+          the pushtrap only occurs in [process_data _ 50], which executed before we started tracing.
+
+          In this case where [process_data _ 70] is also the (non-sentinel) root of our known
+          callstack, it's impossible for magic-trace to distinguish between [process_data _ 70]
+          being a very long-running function that set up its pushtraps early (e.g. the main loop
+          of the async scheduler) vs. the child of an even deeper but unseen stack of non-tail
+          recursive calls. OCaml being what it is, unfortunately I think code of both shapes
+          actually exists. We go with the former interpretation because it should produce a
+          readable trace in either scenario.
+       *)
+       (* TODO Make good on the comment above. Instead of this case and its sibling [Null] case,
+          check if the symbol of the (non-sentinel) root of the current callstack matches the
+          exception destination symbol, and if so return to that frame. Otherwise follow the
+          existing [return_to_unseen] logic from the [Null] case. *)
        log_unexpected_case
          [%message
            "[exception_handlers] appears to be out-of-sync with [callstacks]; there is \
