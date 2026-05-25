@@ -855,8 +855,21 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
      | #(maybe_frame, ~distance, ..) ->
        (* We are probably raising into an exception handler much further up the stack that we never saw the entrance into. *)
        let distance =
-         (* Add 1 to the distance to return past the last physical frame all the way to the sentinel. *)
-         distance + (Or_null.is_this maybe_frame |> Bool.to_int)
+         (* - Add 1 to the distance for the [_phantom_frame] we are injecting.
+            - Possibly add 1 more to the distance to return past the last physical frame (if it exists)
+              all the way to the sentinel.
+         *)
+         distance + 1 + (Or_null.is_this maybe_frame |> Bool.to_int)
+       in
+       let _phantom_frame =
+         let phantom_location : Location.t =
+           { instruction_pointer = 0L
+           ; symbol_offset = 0
+           ; dso = Null
+           ; symbol = From_perf "[zero or more unknowable frames]"
+           }
+         in
+         replace_root t phantom_location ~kind:Physical
        in
        let dst_frame = replace_root t dst ~kind:Physical in
        Nonempty_vec.push_back
