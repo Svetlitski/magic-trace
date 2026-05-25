@@ -540,6 +540,37 @@ let append_inlined_frames t time ~(physical_frame : Frame.t) ~physical_frame_is_
          }
 ;;
 
+let return_to_existing_frame
+  (t : t)
+  time
+  ~(new_location : Location.t)
+  ~(frame : Frame.t)
+  ~(distance : int)
+  ~leaf_of_inlined_stack
+  =
+  match leaf_of_inlined_stack with
+  | #(Null, _) ->
+    Frame.set_instruction_pointer frame new_location.instruction_pointer;
+    Nonempty_vec.push_back
+      t.callstacks
+      #{ time; leaf = frame; control_flow = Return { distance } };
+    append_inlined_frames t time ~physical_frame:frame ~physical_frame_is_new:false
+  | #(This inlined_leaf, inlined_leaf_distance) ->
+    Nonempty_vec.push_back
+      t.callstacks
+      #{ time
+       ; leaf = inlined_leaf
+       ; control_flow = Return { distance = inlined_leaf_distance }
+       };
+    diff_inlined_frames
+      t
+      time
+      ~dso:new_location.dso
+      ~before:frame.instruction_pointer
+      ~after:new_location.instruction_pointer;
+    Frame.set_instruction_pointer frame new_location.instruction_pointer
+;;
+
 (** This is intended to mark code we hope is *unreachable*, not merely uncommon. Hopefully
     over time we can strengthen its callsites to assertions. *)
 let[@cold] log_unexpected_case ~(here : [%call_pos]) sexp =
@@ -574,30 +605,13 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
     | #(This src_frame, ~physical_distance:_, ~distance, ~leaf_of_inlined_stack) ->
       log_unexpected_case
         [%message "call [src] exists, but is higher up the callstack." (src : Location.t)];
-      (match leaf_of_inlined_stack with
-       | #(Null, _) ->
-         Nonempty_vec.push_back
-           t.callstacks
-           #{ time; leaf = src_frame; control_flow = Return { distance } };
-         diff_inlined_frames
-           t
-           time
-           ~dso:src.dso
-           ~before:src_frame.instruction_pointer
-           ~after:src.instruction_pointer
-       | #(This inlined_leaf, inlined_leaf_distance) ->
-         Nonempty_vec.push_back
-           t.callstacks
-           #{ time
-            ; leaf = inlined_leaf
-            ; control_flow = Return { distance = inlined_leaf_distance }
-            };
-         diff_inlined_frames
-           t
-           time
-           ~dso:src.dso
-           ~before:src_frame.instruction_pointer
-           ~after:src.instruction_pointer)
+      return_to_existing_frame
+        t
+        time
+        ~new_location:src
+        ~frame:src_frame
+        ~distance
+        ~leaf_of_inlined_stack
     | #(Null, ~physical_distance:_, ..) ->
       log_unexpected_case
         [%message "call [src] does not match known trace state." (src : Location.t)];
@@ -665,35 +679,15 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           [parent_frame] as expected. We allow for the possibility of "long" returns to
           account for [Sysret]/[Iret] events that return to userspace directly from deep
           within their kernel/interrupt stack. *)
-       (match leaf_of_inlined_stack with
-        | #(Null, _) ->
-          Frame.set_instruction_pointer dst_frame dst.instruction_pointer;
-          Nonempty_vec.push_back
-            t.callstacks
-            #{ time
-             ; leaf = dst_frame
-             ; control_flow = Return { distance = distance + distance_to_parent_frame }
-             };
-          append_inlined_frames
-            t
-            time
-            ~physical_frame:dst_frame
-            ~physical_frame_is_new:false
-        | #(This inlined_leaf, inlined_leaf_distance) ->
-          Nonempty_vec.push_back
-            t.callstacks
-            #{ time
-             ; leaf = inlined_leaf
-             ; control_flow =
-                 Return { distance = inlined_leaf_distance + distance_to_parent_frame }
-             };
-          diff_inlined_frames
-            t
-            time
-            ~dso:dst.dso
-            ~before:dst_frame.instruction_pointer
-            ~after:dst.instruction_pointer;
-          Frame.set_instruction_pointer dst_frame dst.instruction_pointer)
+       let #(maybe_inlined_leaf, inlined_leaf_distance) = leaf_of_inlined_stack in
+       return_to_existing_frame
+         t
+         time
+         ~new_location:dst
+         ~frame:dst_frame
+         ~distance:(distance + distance_to_parent_frame)
+         ~leaf_of_inlined_stack:
+           #(maybe_inlined_leaf, inlined_leaf_distance + distance_to_parent_frame)
      | #(Null, ~physical_distance:0, ~distance, ..) ->
        (* Our [parent_frame] is the sentinel. *)
        return_to_unseen t time ~dst ~distance:(distance + distance_to_parent_frame)
@@ -758,31 +752,13 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
     (match Frame.find_ancestor (current_frame t) ~ancestor:dst_frame with
      | #(~distance:(This distance), ~leaf_of_inlined_stack) ->
        (* This is the happy case where our exception handler tracking is working as expected. *)
-       (match leaf_of_inlined_stack with
-        | #(Null, _) ->
-          Frame.set_instruction_pointer dst_frame dst.instruction_pointer;
-          Nonempty_vec.push_back
-            t.callstacks
-            #{ time; leaf = dst_frame; control_flow = Return { distance } };
-          append_inlined_frames
-            t
-            time
-            ~physical_frame:dst_frame
-            ~physical_frame_is_new:false
-        | #(This inlined_leaf, inlined_leaf_distance) ->
-          Nonempty_vec.push_back
-            t.callstacks
-            #{ time
-             ; leaf = inlined_leaf
-             ; control_flow = Return { distance = inlined_leaf_distance }
-             };
-          diff_inlined_frames
-            t
-            time
-            ~dso:dst.dso
-            ~before:dst_frame.instruction_pointer
-            ~after:dst.instruction_pointer;
-          Frame.set_instruction_pointer dst_frame dst.instruction_pointer)
+       return_to_existing_frame
+         t
+         time
+         ~new_location:dst
+         ~frame:dst_frame
+         ~distance
+         ~leaf_of_inlined_stack
      | #(~distance:Null, ..) ->
        let message =
          match Frame.find (current_frame t) dst.symbol with
@@ -865,32 +841,13 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           unfortunately I think code of both shapes actually exists. We go with the former
           interpretation because it should produce a readable trace in either scenario.
        *)
-       let dst_frame = frame in
-       (match leaf_of_inlined_stack with
-        | #(Null, _) ->
-          Frame.set_instruction_pointer dst_frame dst.instruction_pointer;
-          Nonempty_vec.push_back
-            t.callstacks
-            #{ time; leaf = dst_frame; control_flow = Return { distance } };
-          append_inlined_frames
-            t
-            time
-            ~physical_frame:dst_frame
-            ~physical_frame_is_new:false
-        | #(This inlined_leaf, inlined_leaf_distance) ->
-          Nonempty_vec.push_back
-            t.callstacks
-            #{ time
-             ; leaf = inlined_leaf
-             ; control_flow = Return { distance = inlined_leaf_distance }
-             };
-          diff_inlined_frames
-            t
-            time
-            ~dso:dst.dso
-            ~before:dst_frame.instruction_pointer
-            ~after:dst.instruction_pointer;
-          Frame.set_instruction_pointer dst_frame dst.instruction_pointer)
+       return_to_existing_frame
+         t
+         time
+         ~new_location:dst
+         ~frame
+         ~distance
+         ~leaf_of_inlined_stack
      | #(maybe_frame, ~distance, ..) ->
        (* We are probably raising into an exception handler much further up the stack that we never saw the entrance into. *)
        let distance =
