@@ -801,13 +801,47 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           found in the current callstack, but [t.exception_handlers] will be **empty** because
           the pushtrap only occurs in [process_data _ 50], which executed before we started tracing.
 
-          In this case where [process_data _ 70] is also the (non-sentinel) root of our known
-          callstack, it's impossible for magic-trace to distinguish between [process_data _ 70]
-          being a very long-running function that set up its pushtraps early (e.g. the main loop
-          of the async scheduler) vs. the child of an even deeper but unseen stack of non-tail
-          recursive calls. OCaml being what it is, unfortunately I think code of both shapes
-          actually exists. We go with the former interpretation because it should produce a
-          readable trace in either scenario.
+          Another way this case can occur is a very long-running function that sets up its pushtraps
+          early (e.g. the main loop of the async scheduler). Here's a working example:
+          {v
+
+          open! Core
+
+          let[@cold] print_that_we_are_done () = print_endline "We are done"
+
+          let[@cold] main_application_loop () =
+            let () =
+              try
+                while true do
+                  match (Core_unix.access [@inlined never]) "/tmp/flag.txt" [ `Exists ] with
+                  | Error _ -> ()
+                  | Ok _ -> failwith "/tmp/flag.txt exists now"
+                done
+              with
+              | _ -> ()
+            in
+            print_that_we_are_done ();
+            let mutable x = 0 in
+            while true do
+              x <- x + 1
+            done
+          ;;
+
+          let () = main_application_loop ()
+
+          v}
+
+          If we start tracing this program at any time after startup, the program will already
+          be in the first [while true] loop, without us having seen the entertrap for the surrounding
+          [try] block. When [/tmp/flag.txt] comes into existence and we raise an exception via [failwith],
+          we'll see an entertrap with a destination of [main_application_loop], but [t.exception_handlers]
+          will be **empty**.
+
+          It's impossible for magic-trace to distinguish between these two cases, a very
+          long-running function that set up its pushtraps early vs. the child of an even
+          deeper but unseen stack of non-tail recursive calls. OCaml being what it is,
+          unfortunately I think code of both shapes actually exists. We go with the former
+          interpretation because it should produce a readable trace in either scenario.
        *)
        (* TODO Make good on the comment above. Instead of this case and its sibling [Null] case,
           check if the symbol of the (non-sentinel) root of the current callstack matches the
