@@ -351,8 +351,7 @@ let write_trace_segments (type thread) (t : thread inner) =
       thread_info.trace_segments
       ~f:(fun #(trace_segment, ~in_filtered_region) ->
         if in_filtered_region
-        then
-          Trace_segment.write_trace trace_segment t.trace thread_info.thread t.debug_info))
+        then Trace_segment.write_trace trace_segment t.trace thread_info.thread))
 ;;
 
 let end_of_trace ?to_time (T t) =

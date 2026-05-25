@@ -1033,7 +1033,6 @@ module Writer : sig
   val create
     :  (module Trace_writer_intf.S_trace with type thread = 'thread)
     -> 'thread
-    -> Elf.Addr_table.t
     -> 'thread t @ local
 
   val emit_frame_enter : 'thread t @ local -> Timestamp.t -> Frame.t -> unit
@@ -1061,14 +1060,12 @@ end = struct
         -> category:string
         -> unit
       @@ global
-    ; debug_info : Elf.Addr_table.t @@ global
     }
 
   let create
     (type thread)
     (trace : (module Trace_writer_intf.S_trace with type thread = thread))
     (thread : thread)
-    debug_info
     = exclave_
     let module T = (val trace) in
     stack_
@@ -1080,7 +1077,6 @@ end = struct
       ; write_duration_end =
           (fun ~args ~name ~time ~category ->
             T.write_duration_end ~args ~thread ~name ~time ~category ())
-      ; debug_info
       }
   ;;
 
@@ -1184,9 +1180,8 @@ let write_trace
   (t : t)
   (trace : (module Trace_writer_intf.S_trace with type thread = thread))
   (thread : thread)
-  debug_info
   =
-  let writer = Writer.create trace thread debug_info in
+  let writer = Writer.create trace thread in
   smear_times t.callstacks;
   let () =
     (* Call [emit_frame_enter] for everything in the initial callstack. This takes care of

@@ -16,5 +16,4 @@ val write_trace
   :  t
   -> (module Trace_writer_intf.S_trace with type thread = 'thread)
   -> 'thread
-  -> Elf.Addr_table.t
   -> unit
