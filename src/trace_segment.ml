@@ -923,10 +923,10 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
          prev_inlined_frames <- addr_inlined_frames;
          addr <- I64.O.(addr + #1L)
        done);
-     let #(current_physical_frame, ~distance:_) = current_physical_frame t in
      (match t.ocaml_exception_info with
       | Null -> ()
       | This ocaml_exception_info ->
+        let #(current_physical_frame, ~distance:_) = current_physical_frame t in
         Ocaml_exception_info.iter_pushtraps_and_poptraps_in_range
           ocaml_exception_info
           ~from:t.last_known_location.instruction_pointer
