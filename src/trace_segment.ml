@@ -965,9 +965,9 @@ let add_event (t : t) (event : Event.Ok.Data.t) (time : Timestamp.t) =
      handle_call t time ~src ~dst:Location.untraced
    | Trace { trace_state_change = None; kind = Some kind; src; dst } ->
      (match kind with
-      | Call | Syscall | Hardware_interrupt | Interrupt -> handle_call t time ~src ~dst
-      | (Return | Jump) when is_ocaml_exception_handler t ~dst ->
+      | (Return | Jump | Interrupt) when is_ocaml_exception_handler t ~dst ->
         handle_ocaml_exception t time ~dst
+      | Call | Syscall | Hardware_interrupt | Interrupt -> handle_call t time ~src ~dst
       | Return | Sysret | Iret -> handle_return t time ~dst
       | Jump | Tx_abort | Async -> handle_jump t time ~src ~dst)
    | Trace { kind = None; _ } -> ()
