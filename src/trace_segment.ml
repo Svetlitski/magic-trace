@@ -103,6 +103,11 @@ module Frame : sig
       idea. *)
   val find_first_physical : t -> #(t * distance:int)
 
+  (** Find the last (i.e. root-most) non-sentinel physical frame. *)
+  val find_last_physical
+    :  t
+    -> #(t or_null * distance:int * leaf_of_inlined_stack:#(t or_null * int))
+
   val nth_ancestor_exn : t -> int -> t
 
   module Sentinel : sig
@@ -234,6 +239,38 @@ end = struct
   ;;
 
   let find_first_physical t = find_first_physical t ~distance:0
+
+  let rec find_last_physical t ~distance ~last_physical ~leaf_of_inlined_stack =
+    match t with
+    | { parent = Null; _ } ->
+      let #(last_physical_frame, last_physical_distance) = last_physical in
+      #(last_physical_frame, ~distance:last_physical_distance, ~leaf_of_inlined_stack)
+    | { parent = This parent; kind = Physical; _ } ->
+      find_last_physical
+        parent
+        ~distance:(distance + 1)
+        ~last_physical:#(This t, distance)
+        ~leaf_of_inlined_stack:#(Null, distance)
+    | { parent = This parent; kind = Inlined; _ } ->
+      let leaf_of_inlined_stack =
+        match leaf_of_inlined_stack with
+        | #(Null, _) -> #(This t, distance)
+        | leaf_of_inlined_stack -> leaf_of_inlined_stack
+      in
+      find_last_physical
+        parent
+        ~distance:(distance + 1)
+        ~last_physical
+        ~leaf_of_inlined_stack
+  ;;
+
+  let find_last_physical t =
+    find_last_physical
+      t
+      ~distance:0
+      ~last_physical:#(Null, 0)
+      ~leaf_of_inlined_stack:#(Null, 0)
+  ;;
 
   let nth_ancestor_exn t n =
     let mutable t = t in
@@ -763,24 +800,9 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
        (* TODO Decide if maybe we should just raise in this case? The trace is probably going to be pretty broken if we make it here. *)
        handle_return t time ~dst)
   | Null ->
-    (match Frame.find (current_frame t) dst.symbol with
-     | #(Null, ~distance, ..) ->
-       (* We are probably raising into an exception handler much further up the stack that we never saw the entrance into. *)
-       let dst_frame = replace_root t dst ~kind:Physical in
-       Nonempty_vec.push_back
-         t.callstacks
-         #{ time; leaf = dst_frame; control_flow = Return { distance } };
-       (* Unlike [handle_return] we do *not* make the inlined frames at [dst] (or [dst.instruction_pointer - 1])
-          the parents of the existing frames. The rationale is that unlike [handle_return], we have no idea
-          where we might've been within the frame for [dst] that we just inferred. *)
-       append_inlined_frames
-         t
-         time
-         ~physical_frame:dst_frame
-           (* This is subtle; Yes the frame is new, but we *don't* want to reflect that in a
-              [Call], because discovered roots are handled separately. *)
-         ~physical_frame_is_new:false
-     | #(This dst_frame, ~distance, ~leaf_of_inlined_stack, ..) ->
+    (match Frame.find_last_physical (current_frame t) with
+     | #(This frame, ~distance, ~leaf_of_inlined_stack)
+       when Symbol.equal frame.location.symbol dst.symbol ->
        (* There are valid (but hopefully rare) ways to reach this case.
           Take the following code for example:
           {v
@@ -843,15 +865,7 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           unfortunately I think code of both shapes actually exists. We go with the former
           interpretation because it should produce a readable trace in either scenario.
        *)
-       (* TODO Make good on the comment above. Instead of this case and its sibling [Null] case,
-          check if the symbol of the (non-sentinel) root of the current callstack matches the
-          exception destination symbol, and if so return to that frame. Otherwise follow the
-          existing [return_to_unseen] logic from the [Null] case. *)
-       log_unexpected_case
-         [%message
-           "[exception_handlers] appears to be out-of-sync with [callstacks]; there is \
-            no active exception handler, but a frame with a matching symbol was found."
-             (dst : Location.t)];
+       let dst_frame = frame in
        (match leaf_of_inlined_stack with
         | #(Null, _) ->
           Frame.set_instruction_pointer dst_frame dst.instruction_pointer;
@@ -876,7 +890,27 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
             ~dso:dst.dso
             ~before:dst_frame.instruction_pointer
             ~after:dst.instruction_pointer;
-          Frame.set_instruction_pointer dst_frame dst.instruction_pointer))
+          Frame.set_instruction_pointer dst_frame dst.instruction_pointer)
+     | #(maybe_frame, ~distance, ..) ->
+       (* We are probably raising into an exception handler much further up the stack that we never saw the entrance into. *)
+       let distance =
+         (* Add 1 to the distance to return past the last physical frame all the way to the sentinel. *)
+         distance + (Or_null.is_this maybe_frame |> Bool.to_int)
+       in
+       let dst_frame = replace_root t dst ~kind:Physical in
+       Nonempty_vec.push_back
+         t.callstacks
+         #{ time; leaf = dst_frame; control_flow = Return { distance } };
+       (* Unlike [handle_return] we do *not* make the inlined frames at [dst] (or [dst.instruction_pointer - 1])
+          the parents of the existing frames. The rationale is that unlike [handle_return], we have no idea
+          where we might've been within the frame for [dst] that we just inferred. *)
+       append_inlined_frames
+         t
+         time
+         ~physical_frame:dst_frame
+           (* This is subtle; Yes the frame is new, but we *don't* want to reflect that in a
+              [Call], because discovered roots are handled separately. *)
+         ~physical_frame_is_new:false)
 ;;
 
 let[@cold] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
