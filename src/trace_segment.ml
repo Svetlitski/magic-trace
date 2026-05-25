@@ -678,7 +678,11 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
        (* 99% of the time [physical_distance] should be 0, indicating we are returning to
           [parent_frame] as expected. We allow for the possibility of "long" returns to
           account for [Sysret]/[Iret] events that return to userspace directly from deep
-          within their kernel/interrupt stack. *)
+          within their kernel/interrupt stack.
+
+          Note that this likely isn't sufficient to handle exotic control flow
+          (e.g. [rseq] aborts), but I can't say I've tested that.
+       *)
        let #(maybe_inlined_leaf, inlined_leaf_distance) = leaf_of_inlined_stack in
        return_to_existing_frame
          t
