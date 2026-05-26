@@ -495,54 +495,49 @@ let diff_inlined_frames (t : t) time ~dso ~(before : int64) ~(after : int64) =
     ~after:(symbolize_inlined_frames t ~dso ~addr:after)
 ;;
 
-let append_inlined_frames t time ~(physical_frame : Frame.t) ~physical_frame_is_new =
+let append_inlined_frames
+  t
+  time
+  ~(physical_frame : Frame.t)
+  ~and_insert_physical_frame_too
+  =
   assert (phys_equal physical_frame.kind Physical);
-  match
-    Symbolizer.symbolize
-      t.symbolizer
-      ~executable:physical_frame.location.dso
+  let inlined_frames =
+    symbolize_inlined_frames
+      t
+      ~dso:physical_frame.location.dso
       ~addr:physical_frame.instruction_pointer
-  with
-  | Null ->
-    if physical_frame_is_new
-    then
-      Nonempty_vec.push_back
-        t.callstacks
-        #{ time; leaf = physical_frame; control_flow = Call { depth = 1 } }
-  | This response ->
-    let parent = stack_ (ref physical_frame) in
-    let inlined_frames = Symbolizer.Response.inlined_frames response in
-    Slice.iter inlined_frames ~f:(stack_ fun inlined_frame_info ->
-      let inlined_leaf_frame =
-        Frame.create
-          ~kind:Inlined
-          (Symbolizer.Info.to_location inlined_frame_info)
-          ~parent:!parent
-      in
-      parent := inlined_leaf_frame);
-    if physical_frame_is_new || Slice.length inlined_frames > 0
-    then
-      (* It's important that a [physical_frame] and all of its inlined children are introduced
-         via a single [Callstack.t] for the sake of [smear_times] treating this correctly.
-         When control-flow proceeds from one address to another, where the destination address
-         corresponds to an inlined chain (e.g. [A -> B -> C]), you should treat all of the
-         functions in the chain as having been entered *simultaneously*.
+  in
+  let parent = stack_ (ref physical_frame) in
+  Slice.iter inlined_frames ~f:(stack_ fun inlined_frame_info ->
+    let inlined_leaf_frame =
+      Frame.create
+        ~kind:Inlined
+        (Symbolizer.Info.to_location inlined_frame_info)
+        ~parent:!parent
+    in
+    parent := inlined_leaf_frame);
+  let new_frames =
+    Bool.to_int and_insert_physical_frame_too + Slice.length inlined_frames
+  in
+  if new_frames > 0
+  then
+    (* It's important that a [physical_frame] and all of its inlined children are introduced
+       via a single [Callstack.t] for the sake of [smear_times] treating this correctly.
+       When control-flow proceeds from one address to another, where the destination address
+       corresponds to an inlined chain (e.g. [A -> B -> C]), you should treat all of the
+       functions in the chain as having been entered *simultaneously*.
 
-         Producing exactly one [Callstack.t] accomplishes this; if you instead produced N
-         [Callstack.t]s each of [Call { depth = 1 }], time would get smeared between them.
-         That would produce ugly, aggressively stair-stepped traces, and many more "instantaneous"
-         events. I also would argue such traces to be *incorrect*; smearing out a single instruction
-         to distribute its execution time amongst the 5 layers of wrapper function that contain it
-         is sort of nonsense.
-      *)
-      Nonempty_vec.push_back
-        t.callstacks
-        #{ time
-         ; leaf = !parent
-         ; control_flow =
-             Call
-               { depth = Bool.to_int physical_frame_is_new + Slice.length inlined_frames }
-         }
+       Producing exactly one [Callstack.t] accomplishes this; if you instead produced N
+       [Callstack.t]s each of [Call { depth = 1 }], time would get smeared between them.
+       That would produce ugly, aggressively stair-stepped traces, and many more "instantaneous"
+       events. I also would argue such traces to be *incorrect*; smearing out a single instruction
+       to distribute its execution time amongst the 5 layers of wrapper function that contain it
+       is sort of nonsense.
+    *)
+    Nonempty_vec.push_back
+      t.callstacks
+      #{ time; leaf = !parent; control_flow = Call { depth = new_frames } }
 ;;
 
 let return_to_existing_frame
@@ -559,7 +554,11 @@ let return_to_existing_frame
     Nonempty_vec.push_back
       t.callstacks
       #{ time; leaf = frame; control_flow = Return { distance } };
-    append_inlined_frames t time ~physical_frame:frame ~physical_frame_is_new:false
+    append_inlined_frames
+      t
+      time
+      ~physical_frame:frame
+      ~and_insert_physical_frame_too:false
   | #(This inlined_leaf, inlined_leaf_distance) ->
     Nonempty_vec.push_back
       t.callstacks
@@ -603,7 +602,11 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
     | #(Null, ~physical_distance:0, ..) ->
       (* I would only ever expect this to occur at the very beginning of a trace. *)
       let src_frame = Frame.create src ~parent:(t.root :> Frame.t) ~kind:Physical in
-      append_inlined_frames t time ~physical_frame:src_frame ~physical_frame_is_new:true
+      append_inlined_frames
+        t
+        time
+        ~physical_frame:src_frame
+        ~and_insert_physical_frame_too:true
     | #((This _ | Null), ~physical_distance:_, ..) ->
       log_unexpected_case
         [%message "call [src] does not match known trace state." (src : Location.t)];
@@ -616,14 +619,22 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
          better odds of resynchronizing with the event stream, since now we can easily
          handle a later return event to [src], [dst], or even both. *)
       let src_frame = Frame.create src ~parent:(current_frame t) ~kind:Physical in
-      append_inlined_frames t time ~physical_frame:src_frame ~physical_frame_is_new:true
+      append_inlined_frames
+        t
+        time
+        ~physical_frame:src_frame
+        ~and_insert_physical_frame_too:true
   in
   let #(src_frame, ~distance:_) = current_physical_frame t in
   assert (not (Or_null.is_null src_frame.parent));
   Frame.set_instruction_pointer src_frame src.instruction_pointer;
   (* Then create the new frame for [dst]. *)
   let dst_frame = Frame.create dst ~parent:(current_frame t) ~kind:Physical in
-  append_inlined_frames t time ~physical_frame:dst_frame ~physical_frame_is_new:true
+  append_inlined_frames
+    t
+    time
+    ~physical_frame:dst_frame
+    ~and_insert_physical_frame_too:true
 ;;
 
 (** We are returning into something we did not see the call for. This can happen if
@@ -702,7 +713,11 @@ let handle_return (t : t) (time : Timestamp.t) ~(dst : Location.t) =
           ; control_flow = Return { distance = distance_to_parent_frame }
           };
        let dst_frame = Frame.create dst ~parent:parent_frame ~kind:Physical in
-       append_inlined_frames t time ~physical_frame:dst_frame ~physical_frame_is_new:true)
+       append_inlined_frames
+         t
+         time
+         ~physical_frame:dst_frame
+         ~and_insert_physical_frame_too:true)
 ;;
 
 let handle_jump (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Location.t) =
@@ -724,14 +739,22 @@ let handle_jump (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
          about the previous frame, so we treat this is a [Call] because we only
          want to emit a frame-enter while writing out the trace. *)
       let dst_frame = Frame.create dst ~parent:(t.root :> Frame.t) ~kind:Physical in
-      append_inlined_frames t time ~physical_frame:dst_frame ~physical_frame_is_new:true
+      append_inlined_frames
+        t
+        time
+        ~physical_frame:dst_frame
+        ~and_insert_physical_frame_too:true
     | This parent ->
       (* This is probably a non-recursive tail-call. *)
       Nonempty_vec.push_back
         t.callstacks
         #{ time; leaf = parent; control_flow = Return { distance = distance + 1 } };
       let dst_frame = Frame.create dst ~parent ~kind:Physical in
-      append_inlined_frames t time ~physical_frame:dst_frame ~physical_frame_is_new:true)
+      append_inlined_frames
+        t
+        time
+        ~physical_frame:dst_frame
+        ~and_insert_physical_frame_too:true)
 ;;
 
 let is_ocaml_exception_handler t ~(dst : Location.t) =
@@ -867,7 +890,7 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
          ~physical_frame:dst_frame
            (* This is subtle; Yes the frame is new, but we *don't* want to reflect that in a
               [Call], because discovered roots are handled separately. *)
-         ~physical_frame_is_new:false)
+         ~and_insert_physical_frame_too:false)
 ;;
 
 let[@cold] print (event : Event.Ok.Data.t) (time : Timestamp.t) =
