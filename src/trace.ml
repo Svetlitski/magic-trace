@@ -272,12 +272,18 @@ module Make_commands (Backend : Backend_intf.S) = struct
             Option.bind elf ~f:(fun elf -> Option.try_with (fun () -> Elf.addr_table elf))
           with
           | None ->
-            eprintf
-              "Warning: Debug info is unavailable, so filenames and line numbers will \
-               not be available in the trace.\n\
-               See \
-               https://github.com/janestreet/magic-trace/wiki/Compiling-code-for-maximum-compatibility-with-magic-trace \
-               for more info.\n";
+            (* The new trace-writer uses LLVM to process debug-info. While it's true right now
+               that we still use the Owee-provided symbol table for resolving the [-trigger ...]
+               symbol, I think printing out this warning under the new trace-writer is more
+               confusing than helpful. *)
+            if not Env_vars.use_new_trace_writer
+            then
+              eprintf
+                "Warning: Debug info is unavailable, so filenames and line numbers will \
+                 not be available in the trace.\n\
+                 See \
+                 https://github.com/janestreet/magic-trace/wiki/Compiling-code-for-maximum-compatibility-with-magic-trace \
+                 for more info.\n";
             None
           | Some _ as x -> x
         in
@@ -749,6 +755,7 @@ module Make_commands (Backend : Backend_intf.S) = struct
              in
              let%bind elf = create_elf ~executable ~when_to_snapshot in
              let%bind range_symbols =
+               (* TODO Use LLVM to load the symbol table, because Owee can't handle executables that use DWARF5. *)
                evaluate_trace_filter ~trace_filter:opts.trace_filter ~elf
              in
              let%bind () =
