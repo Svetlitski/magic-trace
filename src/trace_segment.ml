@@ -529,7 +529,12 @@ let append_inlined_frames t time ~(physical_frame : Frame.t) ~physical_frame_is_
          functions in the chain as having been entered *simultaneously*.
 
          Producing exactly one [Callstack.t] accomplishes this; if you instead produced N
-         [Callstack.t]s each of [Call { depth = 1}], time would get smeared between them. *)
+         [Callstack.t]s each of [Call { depth = 1 }], time would get smeared between them.
+         That would produce ugly, aggressively stair-stepped traces, and many more "instantaneous"
+         events. I also would argue such traces to be *incorrect*; smearing out a single instruction
+         to distribute its execution time amongst the 5 layers of wrapper function that contain it
+         is sort of nonsense.
+      *)
       Nonempty_vec.push_back
         t.callstacks
         #{ time
