@@ -413,7 +413,23 @@ let write_event_and_callstack (events_writer : Tracing_tool_output.events_writer
       event_and_callstack
 ;;
 
+let print_error_disclaimer_once =
+  lazy
+    (let #(color_start, color_end) =
+       if Core_unix.isatty Core_unix.stderr then #("\x1b[31m", "\x1b[0m") else #("", "")
+     in
+     eprintf
+       {|%s
+WARNING: You are using the new trace-writer, which currently HAS NO ERROR RECOVERY.
+An error has just been encountered. YOUR TRACE IS LIKELY TO BE HORRIFICALLY BROKEN.
+%s%!
+|}
+       color_start
+       color_end)
+;;
+
 let warn_decode_error ~instruction_pointer ~message =
+  force print_error_disclaimer_once;
   eprintf
     "Warning: perf reported an error decoding the trace: %s\n%!"
     (match instruction_pointer with
