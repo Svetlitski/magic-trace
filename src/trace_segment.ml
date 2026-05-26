@@ -640,7 +640,7 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
 ;;
 
 (** We are returning into something we did not see the call for. This can happen if
-    there's a series of calls like [fn1 -> fn2 -> fn3] and we started tracing during the
+    there's a series of calls like [fn1 -> fn2] and we started tracing during the
     execution of [fn2], then we see a return into [fn1]. *)
 let return_to_unseen (t : t) (time : Timestamp.t) ~(dst : Location.t) ~(distance : int) =
   (* We symbolize at one byte before the return address because the callstack we want to
