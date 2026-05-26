@@ -645,7 +645,7 @@ let return_to_unseen (t : t) (time : Timestamp.t) ~(dst : Location.t) ~(distance
   let inlined_frames = symbolize_inlined_frames t ~dso:dst.dso ~addr in
   let mutable inlined_leaf = Null in
   for i = Slice.length inlined_frames - 1 downto 0 do
-    let%tydi inlined_frame_info = Slice.unsafe_get inlined_frames i in
+    let inlined_frame_info = Slice.unsafe_get inlined_frames i in
     let inlined_frame =
       replace_root t (Symbolizer.Info.to_location inlined_frame_info) ~kind:Inlined
     in
