@@ -590,9 +590,6 @@ let[@cold] log_unexpected_case ~(here : [%call_pos]) sexp =
 (* [handle_call] uses [src], unlike the other event handlers. The rationale for this
    is that in the context of a call, [src] is the parent frame of the call to [dst]
    and thus *it continues to exist*. We want our callstacks to reflect that. *)
-(* TODO I think now that we have inlined frames the [src] reconciliation logic wouldn't
-   work because we run the "straightline-execution inline frames" logic in [add_event]
-   before we ever get here. *)
 let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Location.t) =
   (* First, reconcile things such that [src] matches [current_physical_frame t] if it doesn't
      already. *)
@@ -607,17 +604,7 @@ let handle_call (t : t) (time : Timestamp.t) ~(src : Location.t) ~(dst : Locatio
       (* I would only ever expect this to occur at the very beginning of a trace. *)
       let src_frame = Frame.create src ~parent:(t.root :> Frame.t) ~kind:Physical in
       append_inlined_frames t time ~physical_frame:src_frame ~physical_frame_is_new:true
-    | #(This src_frame, ~physical_distance:_, ~distance, ~leaf_of_inlined_stack) ->
-      log_unexpected_case
-        [%message "call [src] exists, but is higher up the callstack." (src : Location.t)];
-      return_to_existing_frame
-        t
-        time
-        ~new_location:src
-        ~frame:src_frame
-        ~distance
-        ~leaf_of_inlined_stack
-    | #(Null, ~physical_distance:_, ..) ->
+    | #((This _ | Null), ~physical_distance:_, ..) ->
       log_unexpected_case
         [%message "call [src] does not match known trace state." (src : Location.t)];
       (* We've somehow reached [src] without seeing the control-flow that brought us here.
