@@ -86,8 +86,8 @@ let symbolize t ~executable ~addr =
   | Null -> Null
   | This executable ->
     let addr = I64.of_int64 addr in
-    (* LLVM can't symbolize things in the Kernel; checking for this explicitly
-     avoids us polluting our cache with many [Null] responses. *)
+    (* LLVM can't symbolize things in the Kernel, and symbolizing at [NULL] (address 0) is meaningless;
+       checking for this explicitly avoids us polluting our cache with many [Null] responses. *)
     if I64.O.(addr <= #0L)
     then Null
     else
