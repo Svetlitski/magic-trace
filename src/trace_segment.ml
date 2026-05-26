@@ -770,21 +770,11 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
          ~distance
          ~leaf_of_inlined_stack
      | #(~distance:Null, ..) ->
-       let message =
-         match Frame.find (current_frame t) dst.symbol with
-         | #(Null, ..) -> "This is likely to be a bug."
-         | #(This _, ..) ->
-           "This is deeply concerning because another frame with a matching symbol was \
-            found. This is very likely to be a bug."
-       in
-       log_unexpected_case
-         [%message
-           [%string
-             "[exception_handlers] appears to be out-of-sync with [callstacks]; active \
-              exception handler was not found in [callstacks]. %{message}"]
-             (dst : Location.t)];
-       (* TODO Decide if maybe we should just raise in this case? The trace is probably going to be pretty broken if we make it here. *)
-       handle_return t time ~dst)
+       failwithf
+         "Invariant violated, exception handler '%s' was not found in the current \
+          callstack"
+         (Symbol.display_name dst.symbol)
+         ())
   | Null ->
     (match Frame.find_last_physical (current_frame t) with
      | #(This frame, ~distance, ~leaf_of_inlined_stack)
