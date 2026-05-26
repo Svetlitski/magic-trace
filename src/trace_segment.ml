@@ -425,7 +425,7 @@ let create_continuing_from existing =
 let[@inline always] current_frame t = (Nonempty_vec.last t.callstacks).#leaf
 let[@inline always] current_physical_frame t = Frame.find_first_physical (current_frame t)
 
-let replace_root t location ~kind =
+let emplace_root t location ~kind =
   let new_sentinel = Frame.Sentinel.create () in
   let root =
     Frame.Sentinel.become_frame t.root location ~parent:(new_sentinel :> Frame.t) ~kind
@@ -653,12 +653,12 @@ let return_to_unseen (t : t) (time : Timestamp.t) ~(dst : Location.t) ~(distance
   for i = last_index downto 0 do
     let inlined_frame_info = Slice.unsafe_get inlined_frames i in
     let inlined_frame =
-      replace_root t (Symbolizer.Info.to_location inlined_frame_info) ~kind:Inlined
+      emplace_root t (Symbolizer.Info.to_location inlined_frame_info) ~kind:Inlined
     in
     if i = last_index then inlined_leaf <- This inlined_frame
   done;
   let (physical_root : Frame.t) =
-    replace_root t { dst with instruction_pointer = addr } ~kind:Physical
+    emplace_root t { dst with instruction_pointer = addr } ~kind:Physical
   in
   Nonempty_vec.push_back
     t.callstacks
@@ -875,9 +875,9 @@ let handle_ocaml_exception (t : t) (time : Timestamp.t) ~(dst : Location.t) =
            ; symbol = From_perf "[zero or more unknowable frames]"
            }
          in
-         replace_root t phantom_location ~kind:Physical
+         emplace_root t phantom_location ~kind:Physical
        in
-       let dst_frame = replace_root t dst ~kind:Physical in
+       let dst_frame = emplace_root t dst ~kind:Physical in
        Nonempty_vec.push_back
          t.callstacks
          #{ time; leaf = dst_frame; control_flow = Return { distance } };
@@ -1209,7 +1209,7 @@ let write_trace
   let () =
     (* Call [emit_frame_enter] for everything in the initial callstack. This takes care of
        entering any root frames that we discovered by returning into them (i.e. the places
-       where we call [replace_root]). *)
+       where we call [emplace_root]). *)
     let%tydi #{ leaf; time; _ } = Nonempty_vec.first t.callstacks in
     Frame.iter_n_rev leaf Int.max_value ~f:(stack_ fun frame ->
       Writer.emit_frame_enter writer time frame)
