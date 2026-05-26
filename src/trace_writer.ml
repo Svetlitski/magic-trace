@@ -1134,14 +1134,14 @@ and write_event' (T t) ?events_writer event =
               | Tx_abort )
           , Some Start )
         | Some Async, None
-        | Some (Hardware_interrupt | Jump | Interrupt | Tx_abort), Some End ->
+        | Some (Hardware_interrupt | Jump | Tx_abort), Some End ->
           raise_s
             [%message
               "BUG: magic-trace devs thought this event was impossible, but you just \
                proved them wrong. Please report this to \
                https://github.com/janestreet/magic-trace/issues/"
                 (event : Event.t)]
-        | (None | Some Async), Some End ->
+        | (None | Some Async | Some Interrupt), Some End ->
           call t thread_info ~time ~location:Event.Location.untraced
         | Some Syscall, Some End ->
           (* We should only be getting these under /u *)
